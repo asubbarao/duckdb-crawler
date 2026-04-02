@@ -27,6 +27,10 @@ std::string ExtractCssWithRust(const std::string &html, const std::string &selec
 // Returns compact JSON: {meta, og, readability, schema, js, links, tables}
 std::string PageInfoWithRust(const std::string &html, const std::string &url);
 
+// Extract SPA hydration state (Next.js, Nuxt, Pinia, Apollo)
+// Returns JSON object keyed by framework identifier (e.g., "__NEXT_DATA__", "__pinia")
+std::string ExtractHydrationWithRust(const std::string &html);
+
 // Extract article content using readability algorithm
 // Returns JSON: {"title": "...", "content": "<html>", "text_content": "...", "length": 123, "excerpt": "..."}
 std::string ExtractReadabilityWithRust(const std::string &html, const std::string &url);

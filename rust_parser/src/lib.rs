@@ -8,9 +8,11 @@
 //! - CSS selectors (jQuery-like syntax)
 //! - robots.txt parsing
 //! - Sitemap XML parsing
+//! - SPA hydration state (Next.js, Nuxt, Pinia, Apollo)
 
 mod extractors;
 mod ffi;
+pub mod hydration;
 pub mod robots;
 pub mod sitemap;
 

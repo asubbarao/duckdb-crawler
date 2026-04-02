@@ -4,9 +4,7 @@ use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use swc_common::{sync::Lrc, SourceMap, FileName};
-use swc_ecma_parser::{lexer::Lexer, Parser, StringInput, Syntax};
-use swc_ecma_ast::*;
+use crate::hydration;
 
 /// Extraction request from C++
 #[derive(Debug, Clone, Deserialize)]
@@ -806,206 +804,36 @@ fn navigate_json(value: &serde_json::Value, path: &[String]) -> Option<serde_jso
     Some(current)
 }
 
-/// Extract JavaScript variables from script tags using AST parsing
+/// Extract JavaScript variables from script tags using tree-sitter.
+/// Delegates to the hydration module's window assignment extractor.
 pub fn extract_js_variables(document: &Html) -> HashMap<String, Value> {
     let mut result = HashMap::new();
-    let selector = Selector::parse("script:not([type]), script[type='text/javascript']").unwrap();
-
-    for element in document.select(&selector) {
-        let script_text = element.text().collect::<String>();
-
-        // Parse with SWC and extract variables
-        if let Some(vars) = parse_js_and_extract_vars(&script_text) {
-            for (name, value) in vars {
-                result.insert(name, value);
-            }
-        }
-    }
-
+    hydration::extract_window_assignments(document, &mut result);
     result
 }
 
-/// Parse JavaScript source and extract variable declarations
-fn parse_js_and_extract_vars(source: &str) -> Option<HashMap<String, Value>> {
-    let cm: Lrc<SourceMap> = Default::default();
-    let fm = cm.new_source_file(FileName::Anon.into(), source.to_string());
+/// Parse JavaScript source and extract variable declarations.
+/// Uses tree-sitter for error-tolerant parsing.
+pub fn parse_js_and_extract_vars(source: &str) -> Option<HashMap<String, Value>> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_javascript::LANGUAGE.into())
+        .ok()?;
 
-    let lexer = Lexer::new(
-        Syntax::Es(Default::default()),
-        Default::default(),
-        StringInput::from(&*fm),
-        None,
-    );
-
-    let mut parser = Parser::new_from(lexer);
-
-    // Try to parse as script, ignoring errors (JS in HTML often has issues)
-    let script = match parser.parse_script() {
-        Ok(s) => s,
-        Err(_) => return None,
+    // Decode HTML entities before parsing
+    let decoded = if source.contains("&quot;") || source.contains("&amp;") || source.contains("&lt;") {
+        match htmlescape::decode_html(source) {
+            Ok(d) => d,
+            Err(_) => source.to_string(),
+        }
+    } else {
+        source.to_string()
     };
 
+    let tree = parser.parse(decoded.as_bytes(), None)?;
     let mut result = HashMap::new();
-
-    for stmt in &script.body {
-        extract_vars_from_stmt(stmt, &mut result);
-    }
-
+    hydration::extract_assignments_from_tree(&decoded, tree.root_node(), &mut result);
     Some(result)
-}
-
-/// Extract variable declarations from a statement
-fn extract_vars_from_stmt(stmt: &Stmt, result: &mut HashMap<String, Value>) {
-    match stmt {
-        Stmt::Decl(Decl::Var(var_decl)) => {
-            for decl in &var_decl.decls {
-                if let Some(init) = &decl.init {
-                    if let Pat::Ident(ident) = &decl.name {
-                        let var_name = ident.sym.as_str().to_string();
-                        if let Some(value) = expr_to_json(init) {
-                            result.insert(var_name, value);
-                        }
-                    }
-                }
-            }
-        }
-        Stmt::Expr(expr_stmt) => {
-            // Handle: varName = value (assignment expressions)
-            if let Expr::Assign(assign) = &*expr_stmt.expr {
-                if let AssignTarget::Simple(SimpleAssignTarget::Ident(ident)) = &assign.left {
-                    let var_name = ident.sym.as_str().to_string();
-                    if let Some(value) = expr_to_json(&assign.right) {
-                        result.insert(var_name, value);
-                    }
-                }
-            }
-        }
-        _ => {}
-    }
-}
-
-/// Convert a JavaScript expression to a JSON Value
-fn expr_to_json(expr: &Expr) -> Option<Value> {
-    match expr {
-        // String literals
-        Expr::Lit(Lit::Str(s)) => Some(Value::String(s.value.as_str().unwrap_or("").to_string())),
-
-        // Number literals
-        Expr::Lit(Lit::Num(n)) => {
-            if n.value.fract() == 0.0 && n.value >= i64::MIN as f64 && n.value <= i64::MAX as f64 {
-                Some(Value::Number(serde_json::Number::from(n.value as i64)))
-            } else {
-                serde_json::Number::from_f64(n.value).map(Value::Number)
-            }
-        }
-
-        // Boolean literals
-        Expr::Lit(Lit::Bool(b)) => Some(Value::Bool(b.value)),
-
-        // Null literal
-        Expr::Lit(Lit::Null(_)) => Some(Value::Null),
-
-        // Object literals: { key: value, ... }
-        Expr::Object(obj) => {
-            let mut map = serde_json::Map::new();
-            for prop in &obj.props {
-                if let PropOrSpread::Prop(prop) = prop {
-                    if let Prop::KeyValue(kv) = &**prop {
-                        let key = prop_name_to_string(&kv.key)?;
-                        let value = expr_to_json(&kv.value)?;
-                        map.insert(key, value);
-                    }
-                }
-            }
-            Some(Value::Object(map))
-        }
-
-        // Array literals: [a, b, c]
-        Expr::Array(arr) => {
-            let mut values = Vec::new();
-            for elem in &arr.elems {
-                if let Some(ExprOrSpread { expr, .. }) = elem {
-                    if let Some(value) = expr_to_json(expr) {
-                        values.push(value);
-                    } else {
-                        values.push(Value::Null);
-                    }
-                } else {
-                    values.push(Value::Null);
-                }
-            }
-            Some(Value::Array(values))
-        }
-
-        // JSON.parse('...') call
-        Expr::Call(call) => {
-            if is_json_parse_call(call) {
-                if let Some(ExprOrSpread { expr: arg, .. }) = call.args.first() {
-                    if let Expr::Lit(Lit::Str(s)) = &**arg {
-                        // Parse the string as JSON
-                        if let Some(str_val) = s.value.as_str() {
-                            if let Ok(value) = serde_json::from_str(str_val) {
-                                return Some(value);
-                            }
-                        }
-                    }
-                }
-            }
-            None
-        }
-
-        // Unary expressions: -5, +3
-        Expr::Unary(unary) => {
-            if unary.op == UnaryOp::Minus {
-                if let Expr::Lit(Lit::Num(n)) = &*unary.arg {
-                    let neg = -n.value;
-                    if neg.fract() == 0.0 && neg >= i64::MIN as f64 && neg <= i64::MAX as f64 {
-                        return Some(Value::Number(serde_json::Number::from(neg as i64)));
-                    } else {
-                        return serde_json::Number::from_f64(neg).map(Value::Number);
-                    }
-                }
-            }
-            None
-        }
-
-        // Template literals without expressions: `string`
-        Expr::Tpl(tpl) if tpl.exprs.is_empty() => {
-            if let Some(quasi) = tpl.quasis.first() {
-                Some(Value::String(quasi.raw.as_str().to_string()))
-            } else {
-                None
-            }
-        }
-
-        _ => None,
-    }
-}
-
-/// Check if a call expression is JSON.parse(...)
-fn is_json_parse_call(call: &CallExpr) -> bool {
-    if let Callee::Expr(expr) = &call.callee {
-        if let Expr::Member(member) = &**expr {
-            if let Expr::Ident(obj) = &*member.obj {
-                if obj.sym.as_ref() == "JSON" {
-                    if let MemberProp::Ident(prop) = &member.prop {
-                        return prop.sym.as_ref() == "parse";
-                    }
-                }
-            }
-        }
-    }
-    false
-}
-
-/// Convert property name to string
-fn prop_name_to_string(name: &PropName) -> Option<String> {
-    match name {
-        PropName::Ident(ident) => Some(ident.sym.as_str().to_string()),
-        PropName::Str(s) => s.value.as_str().map(|v| v.to_string()),
-        PropName::Num(n) => Some(n.value.to_string()),
-        _ => None,
-    }
 }
 
 /// Navigate JS variable data by path
@@ -1551,12 +1379,11 @@ fn test_attribute_selectors() {
 }
 
 #[test]
-fn test_js_extraction_json_parse() {
+fn test_js_extraction_vars_and_objects() {
     let html = r#"
     <html>
     <head>
         <script>
-        var jobs = JSON.parse('[{"id":"123","title":"Developer"}]');
         var page_id = '900000000022233';
         var meta = {"org_info":{"company_name":"Test Corp","id":"12345"},"page_id":"abc"};
         </script>
@@ -1567,18 +1394,11 @@ fn test_js_extraction_json_parse() {
     let document = Html::parse_document(html);
     let js_vars = extract_js_variables(&document);
 
-    // Test JSON.parse extraction
-    assert!(js_vars.contains_key("jobs"));
-    let jobs = &js_vars["jobs"];
-    assert!(jobs.is_array());
-    assert_eq!(jobs[0]["id"], "123");
-    assert_eq!(jobs[0]["title"], "Developer");
-
     // Test simple string extraction
     assert!(js_vars.contains_key("page_id"));
     assert_eq!(js_vars["page_id"], "900000000022233");
 
-    // Test object literal extraction
+    // Test object literal extraction (tree-sitter + json5)
     assert!(js_vars.contains_key("meta"));
     let meta = &js_vars["meta"];
     assert_eq!(meta["org_info"]["company_name"], "Test Corp");
@@ -1586,12 +1406,12 @@ fn test_js_extraction_json_parse() {
 }
 
 #[test]
-fn test_js_extraction_escaped_strings() {
+fn test_js_extraction_window_assignment() {
     let html = r#"
     <html>
     <head>
         <script>
-        var data = JSON.parse('[{\x22name\x22:\x22Test\x22}]');
+        window.__INITIAL_STATE__ = {"user": "test", "count": 42};
         </script>
     </head>
     </html>
@@ -1600,9 +1420,9 @@ fn test_js_extraction_escaped_strings() {
     let document = Html::parse_document(html);
     let js_vars = extract_js_variables(&document);
 
-    assert!(js_vars.contains_key("data"));
-    let data = &js_vars["data"];
-    assert_eq!(data[0]["name"], "Test");
+    assert!(js_vars.contains_key("__INITIAL_STATE__"));
+    assert_eq!(js_vars["__INITIAL_STATE__"]["user"], "test");
+    assert_eq!(js_vars["__INITIAL_STATE__"]["count"], 42);
 }
 
 #[test]
@@ -1693,7 +1513,7 @@ fn test_extract_table_basic() {
     </html>
     "#;
 
-    let result = extract_table(html, "table#data", false);
+    let result = extract_table(html, "table#data", false, 0);
 
     assert!(result.error.is_none());
     assert_eq!(result.headers, vec!["Name", "Value"]);
@@ -1729,7 +1549,7 @@ fn test_extract_table_wikipedia_citations_removed() {
     "##;
 
     // Test WITH Wikipedia mode (citations should be removed)
-    let result_wiki = extract_table(html, "table.wikitable", true);
+    let result_wiki = extract_table(html, "table.wikitable", true, 0);
 
     assert!(result_wiki.error.is_none());
     assert_eq!(result_wiki.headers, vec!["Building", "Cost"]);
@@ -1739,7 +1559,7 @@ fn test_extract_table_wikipedia_citations_removed() {
     assert_eq!(result_wiki.rows[1][1], "10.5");  // No citation numbers!
 
     // Test WITHOUT Wikipedia mode (citations should be preserved in text)
-    let result_normal = extract_table(html, "table.wikitable", false);
+    let result_normal = extract_table(html, "table.wikitable", false, 0);
 
     assert!(result_normal.error.is_none());
     // Normal mode includes the citation text

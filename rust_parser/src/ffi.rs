@@ -1169,3 +1169,35 @@ unsafe fn check_robots_ffi_inner(request_json: *const c_char) -> ExtractionResul
         },
     }
 }
+
+/// Extract hydration state from SPA frameworks (Next.js, Nuxt, Pinia, Apollo)
+/// Returns JSON object keyed by framework identifier
+#[no_mangle]
+pub unsafe extern "C" fn extract_hydration_ffi(
+    html_ptr: *const c_char,
+    html_len: usize,
+) -> ExtractionResultFFI {
+    let html = match std::str::from_utf8(std::slice::from_raw_parts(html_ptr as *const u8, html_len)) {
+        Ok(s) => s,
+        Err(e) => {
+            return ExtractionResultFFI {
+                json_ptr: ptr::null_mut(),
+                error_ptr: string_to_ptr(format!("Invalid UTF-8: {}", e)),
+            };
+        }
+    };
+
+    let document = scraper::Html::parse_document(html);
+    let hydration = crate::hydration::extract_hydration_state(&document);
+
+    match serde_json::to_string(&hydration) {
+        Ok(json) => ExtractionResultFFI {
+            json_ptr: string_to_ptr(json),
+            error_ptr: ptr::null_mut(),
+        },
+        Err(e) => ExtractionResultFFI {
+            json_ptr: ptr::null_mut(),
+            error_ptr: string_to_ptr(format!("Serialization error: {}", e)),
+        },
+    }
+}

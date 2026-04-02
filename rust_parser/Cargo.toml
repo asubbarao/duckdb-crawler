@@ -11,10 +11,13 @@ scraper = "0.22"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"
-# Using latest SWC versions for serde compatibility
-swc_ecma_parser = "33"
-swc_ecma_ast = "20"
-swc_common = { version = "18", features = ["sourcemap"] }
+# JS parsing via tree-sitter (lighter than SWC, better error recovery)
+tree-sitter = "0.24"
+tree-sitter-javascript = "0.23"
+# Parse JS object literals (unquoted keys, trailing commas) as JSON
+json5 = "0.4"
+# Decode HTML entities in script content (Pinia/Vue SSR)
+htmlescape = "0.3"
 # HTTP client for Rust-side crawling
 reqwest = { version = "0.12", features = ["rustls-tls", "gzip", "brotli", "deflate", "blocking"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

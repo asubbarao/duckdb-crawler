@@ -2,6 +2,22 @@
 
 A high-performance web crawler extension for DuckDB that fetches web pages, extracts structured data from HTML, and stores results directly in database tables.
 
+## Quick Start
+
+```sql
+-- Install from DuckDB community extensions
+INSTALL crawler FROM community;
+LOAD crawler;
+
+-- Simple crawl
+CRAWL (SELECT 'https://example.com/')
+INTO pages
+WITH (max_crawl_pages 10);
+
+-- View results
+SELECT url, status_code, length(body) as size FROM pages;
+```
+
 ## Features
 
 - **Native SQL syntax** - `CRAWL` statement integrates seamlessly with DuckDB
@@ -15,7 +31,7 @@ A high-performance web crawler extension for DuckDB that fetches web pages, extr
   - OpenGraph meta tags
   - CSS selectors
   - JavaScript variables (AST-based via tree-sitter)
-- **EXTRACT clause** - Pull specific fields during crawl
+  - SPA hydration state (Next.js, Nuxt, Vue/Pinia, Apollo)
 - **Predicate pushdown** - Filter URLs before fetching
 - **Rate limiting** per domain with adaptive backoff
 - **Link following** with depth control
@@ -25,13 +41,13 @@ A high-performance web crawler extension for DuckDB that fetches web pages, extr
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         CRAWL Statement                         │
-│  CRAWL (SELECT urls) INTO table EXTRACT (...) WHERE ... WITH   │
+│         CRAWL (SELECT urls) INTO table WHERE ... WITH           │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    DuckDB Parser Extension                      │
-│  Parses CRAWL/INTO/EXTRACT/WHERE/WITH into execution plan      │
+│      Parses CRAWL/INTO/WHERE/WITH into execution plan          │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -52,22 +68,16 @@ A high-performance web crawler extension for DuckDB that fetches web pages, extr
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                   HTML Parser (Rust FFI)                        │
-│  ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌─────────────┐    │
-│  │  JSON-LD  │ │ Microdata │ │    CSS    │ │ JS Variables│    │
-│  │ (yyjson)  │ │ (scraper) │ │ (scraper) │ │(tree-sitter)│    │
-│  └───────────┘ └───────────┘ └───────────┘ └─────────────┘    │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      EXTRACT Evaluation                         │
-│  Dot notation · COALESCE · Type coercion · Transforms          │
+│  ┌─────────┐ ┌───────────┐ ┌───────┐ ┌───────────┐ ┌───────────┐│
+│  │ JSON-LD │ │ Microdata │ │  CSS  │ │ Hydration │ │JS Vars    ││
+│  │(scraper)│ │ (scraper) │ │(scpr) │ │(tree-sitr)│ │(tree-sitr)││
+│  └─────────┘ └───────────┘ └───────┘ └───────────┘ └───────────┘│
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                        DuckDB Table                             │
-│  url | status | body | jsonld | microdata | extracted_* | ...  │
+│      url | status | body | jsonld | microdata | meta | ...      │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -124,57 +134,32 @@ The Rust HTML parser processes each response:
 - Captures `window.X = {...}` assignments
 - Parses object/array literal values to JSON
 
-### 4. EXTRACT Evaluation
-
-EXTRACT expressions are evaluated against parsed data:
-
-```sql
-EXTRACT (
-    jsonld.Product.name,                    -- Dot notation path
-    COALESCE(jsonld.gtin, microdata.gtin),  -- First non-null
-    price DECIMAL FROM css '.price' | parse_price  -- CSS + transform
-)
-```
-
-- **Path traversal** - Navigates nested JSON structures
-- **COALESCE** - Tries sources in order until non-null found
-- **Transforms** - String processing (trim, parse_price, etc.)
-- **Type coercion** - Converts to DECIMAL, INTEGER, BOOLEAN
-
-### 5. Storage
+### 4. Storage
 
 Results are batch-inserted into the target DuckDB table:
 
 - Table created automatically if not exists
-- Schema includes standard columns + EXTRACT aliases
 - Efficient batch inserts (configurable batch size)
 - Transaction per batch for consistency
 
 ## Installation
 
+```sql
+-- Install from DuckDB community extensions (recommended)
+INSTALL crawler FROM community;
+LOAD crawler;
+```
+
+### Building from Source
+
 ```bash
-# Build from source (requires Rust toolchain)
-git clone https://github.com/user/duckdb-crawler
+git clone https://github.com/midwork-finds-jobs/duckdb-crawler
 cd duckdb-crawler
 ./vcpkg/bootstrap-vcpkg.sh
 make release VCPKG_TOOLCHAIN_PATH=$(pwd)/vcpkg/scripts/buildsystems/vcpkg.cmake
 
 # Load in DuckDB
-LOAD 'build/release/extension/crawler/crawler.duckdb_extension';
-```
-
-## Quick Start
-
-```sql
-LOAD 'build/release/extension/crawler/crawler.duckdb_extension';
-
--- Simple crawl
-CRAWL (SELECT 'https://example.com/')
-INTO pages
-WITH (max_crawl_pages 10);
-
--- View results
-SELECT url, status_code, length(body) as size FROM pages;
+duckdb -unsigned -c "LOAD 'build/release/extension/crawler/crawler.duckdb_extension';"
 ```
 
 ## Table Functions
@@ -297,6 +282,44 @@ SELECT
     html.schema['Product']->'offers'->>'price' as price
 FROM crawl(['https://shop.example.com/item']);
 ```
+
+### html.hydration - SPA Framework State
+
+Extracts embedded application state from JavaScript SPA frameworks. Returns `MAP(VARCHAR, JSON)` — access by framework key. Supports Next.js, Nuxt, Vue/Pinia, Apollo, and generic `window.X` assignments.
+
+```sql
+-- See what hydration data a site exposes
+SELECT url, map_keys(html.hydration) as keys
+FROM crawl(['https://www.prisma.fi/']);
+-- keys: [__NEXT_DATA__]
+
+-- Access Next.js page props directly
+SELECT
+    html.hydration['__NEXT_DATA__']->'props'->'pageProps'->>'title' as title,
+    html.hydration['__NEXT_DATA__']->'props'->'pageProps'->'pageProducts' as products
+FROM crawl(['https://www.prisma.fi/']);
+
+-- Access Nuxt/Vue hydration data (e.g., Lidl.fi)
+SELECT
+    html.hydration['unified_datalayer_product']->>'name' as name,
+    html.hydration['unified_datalayer_product']->>'price' as price,
+    html.hydration['unified_datalayer_product']->>'brand' as brand
+FROM crawl(['https://www.lidl.fi/p/milbona-mozzarella/p10032843']);
+-- name: Mozzarella, price: 1.99, brand: MILBONA
+
+-- Works with any SPA framework that embeds state in HTML
+SELECT url, map_keys(html.hydration) as keys
+FROM crawl(['https://www.verkkokauppa.com/']);
+-- keys: [state, __CONFIG__, data, translations, ...]
+```
+
+Supported extraction patterns:
+- `<script id="__NEXT_DATA__" type="application/json">` (Next.js)
+- `window.__NUXT__`, `window.__pinia`, `window.__APOLLO_STATE__` (Vue/Nuxt/Apollo)
+- `window.dataLayer`, `window.__INITIAL_STATE__` (generic)
+- Any `<script type="application/json">` block (keyed by `id` attribute)
+- HTML entity decoding for encoded state (`&quot;` → `"`)
+- Devalue format deserialization (Pinia/Nuxt reference arrays → nested JSON)
 
 ## CRAWLING MERGE INTO
 
@@ -430,7 +453,6 @@ See the `examples/` directory for complete working examples:
 ```sql
 CRAWL (subquery)
 INTO table_name
-[EXTRACT (extraction_specs)]
 [WHERE url_filter]
 [WITH (options)]
 [LIMIT n]
@@ -442,252 +464,13 @@ INTO table_name
 |--------|----------|-------------|
 | `CRAWL (subquery)` | Yes | Source URLs - any SELECT returning URL strings |
 | `INTO table_name` | Yes | Target table (created if not exists) |
-| `EXTRACT (...)` | No | Fields to extract from HTML |
 | `WHERE condition` | No | URL filter applied before fetching |
 | `WITH (options)` | No | Crawler configuration |
 | `LIMIT n` | No | Maximum pages to crawl |
 
-## EXTRACT Syntax
-
-The EXTRACT clause specifies structured data to pull from HTML pages during crawling. This eliminates the need for post-processing queries.
-
-### Basic Syntax
-
-```sql
-EXTRACT (
-    source.path as alias,
-    source.path.to.nested.field,
-    COALESCE(source1.path, source2.path) as fallback_field,
-    alias TYPE FROM source 'selector' | transform
-)
-```
-
-### Data Sources
-
-| Source | Description | Example |
-|--------|-------------|---------|
-| `jsonld` | JSON-LD from `<script type="application/ld+json">` | `jsonld.Product.name` |
-| `microdata` | Schema.org from `itemscope`/`itemprop` | `microdata.Product.gtin` |
-| `og` | OpenGraph meta tags | `og.title`, `og.image` |
-| `meta` | Standard meta tags | `meta.description` |
-| `js` | JavaScript variables | `js.siteConfig.price` |
-| `css` | CSS selector extraction | `css '.price::text'` |
-
-### Dot Notation
-
-Access nested JSON fields using dots:
-
-```sql
-EXTRACT (
-    -- Simple field
-    jsonld.Product.name,
-
-    -- Nested objects
-    jsonld.Product.offers.price,
-    jsonld.Product.brand.name,
-
-    -- From different sources
-    microdata.Product.gtin,
-    og.title,
-    og.image,
-    meta.description
-)
-```
-
-### Array Access
-
-Access array elements with bracket notation:
-
-```sql
-EXTRACT (
-    jsonld.Product.image[0] as main_image,
-    jsonld.Product.offers[0].price as first_price,
-    jsonld.ItemList.itemListElement[0].item.name as first_item
-)
-```
-
-### COALESCE - Fallback Values
-
-Try multiple sources, use first non-null value:
-
-```sql
-EXTRACT (
-    -- Try JSON-LD first, fall back to microdata
-    COALESCE(jsonld.Product.gtin13, jsonld.Product.gtin, microdata.Product.gtin) as gtin,
-
-    -- Try structured data, fall back to meta tags
-    COALESCE(jsonld.Product.name, og.title, meta.title) as name,
-
-    -- Mix sources freely
-    COALESCE(jsonld.Product.offers.price, microdata.Offer.price, js.productPrice) as price
-)
-```
-
-### CSS Selectors
-
-Extract content using CSS selectors with pseudo-elements:
-
-```sql
-EXTRACT (
-    -- Text content
-    css '.product-title::text' as title,
-    css 'h1.name::text' as heading,
-
-    -- Attribute values
-    css 'img.product::attr(src)' as image_url,
-    css 'a.buy-button::attr(href)' as buy_link,
-
-    -- Outer HTML (default)
-    css 'div.description' as description_html
-)
-```
-
-**Pseudo-elements:**
-| Pseudo | Description |
-|--------|-------------|
-| `::text` | Extract text content (strips HTML tags) |
-| `::attr(name)` | Extract attribute value |
-| (none) | Extract outer HTML |
-
-### Typed Extraction
-
-Specify output type with optional transform:
-
-```sql
-EXTRACT (
-    -- Type coercion
-    price DECIMAL FROM jsonld.Product.offers.price,
-    quantity INTEGER FROM css '.qty::text',
-    in_stock BOOLEAN FROM jsonld.Product.offers.availability,
-
-    -- Type + transform
-    price DECIMAL FROM css '.price::text' | parse_price,
-    name VARCHAR FROM jsonld.Product.name | trim
-)
-```
-
-**Supported Types:**
-| Type | Description |
-|------|-------------|
-| `VARCHAR` | String (default) |
-| `DECIMAL` / `DOUBLE` / `FLOAT` | Numeric with decimals |
-| `INTEGER` / `BIGINT` / `INT` | Whole numbers |
-| `BOOLEAN` / `BOOL` | true/false |
-
-### Transforms
-
-Apply transformations to extracted values:
-
-```sql
-EXTRACT (
-    -- Whitespace handling
-    jsonld.Product.name | trim as name,
-
-    -- Price parsing: "€12.99" → "12.99"
-    price DECIMAL FROM css '.price::text' | parse_price,
-
-    -- Case conversion
-    jsonld.Product.sku | uppercase as sku,
-    og.title | lowercase as title_lower,
-
-    -- HTML stripping
-    jsonld.Product.description | strip_html as description
-)
-```
-
-**Available Transforms:**
-| Transform | Description | Example |
-|-----------|-------------|---------|
-| `trim` | Remove leading/trailing whitespace | `"  hello  "` → `"hello"` |
-| `parse_price` | Extract numeric from price string | `"€12,99"` → `"12.99"` |
-| `lowercase` | Convert to lowercase | `"Hello"` → `"hello"` |
-| `uppercase` | Convert to uppercase | `"Hello"` → `"HELLO"` |
-| `strip_html` | Remove HTML tags | `"<b>Hi</b>"` → `"Hi"` |
-
-### Type Coercion Details
-
-**DECIMAL/DOUBLE/FLOAT:**
-- Extracts digits and decimal point
-- Handles negative numbers
-- `"€12.99"` → `12.99`
-- `"-5.5"` → `-5.5`
-
-**INTEGER/BIGINT:**
-- Extracts digits only
-- Handles negative numbers
-- `"42 items"` → `42`
-- `"-10"` → `-10`
-
-**BOOLEAN:**
-- Recognizes: `true`, `false`, `yes`, `no`, `1`, `0`, `on`, `off`
-- Case-insensitive
-- Returns empty string for invalid values
-
-## WITH Options
-
-```sql
-WITH (
-    -- Required
-    user_agent 'MyBot/1.0 (+https://example.com/bot)',
-
-    -- HTTP settings
-    timeout_seconds 30,
-    max_retries 3,
-    compress true,
-
-    -- Crawl behavior
-    follow_links true,
-    max_crawl_depth 3,
-    max_crawl_pages 1000,
-    allow_subdomains false,
-
-    -- Rate limiting
-    default_crawl_delay 1.0,
-    min_crawl_delay 0.5,
-    max_crawl_delay 60.0,
-    max_parallel_per_domain 4,
-
-    -- Content filtering
-    accept_content_types 'text/html,application/xhtml+xml',
-    reject_content_types 'application/pdf',
-    max_response_bytes 10485760,
-
-    -- robots.txt
-    respect_robots_txt true,
-
-    -- Extraction
-    extract_js true
-)
-```
-
-### Option Reference
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `user_agent` | string | required | HTTP User-Agent header |
-| `timeout_seconds` | int | 30 | Request timeout |
-| `max_retries` | int | 3 | Retry failed requests |
-| `compress` | bool | true | Request gzip/deflate |
-| `follow_links` | bool | false | Discover linked pages |
-| `max_crawl_depth` | int | 10 | Maximum link depth |
-| `max_crawl_pages` | int | 10000 | Maximum pages to crawl |
-| `allow_subdomains` | bool | false | Follow subdomain links |
-| `default_crawl_delay` | float | 1.0 | Delay between requests (seconds) |
-| `min_crawl_delay` | float | 0.0 | Minimum delay floor |
-| `max_crawl_delay` | float | 60.0 | Maximum delay cap |
-| `max_parallel_per_domain` | int | 8 | Concurrent requests per domain |
-| `max_total_connections` | int | 32 | Global connection limit |
-| `accept_content_types` | string | '' | Whitelist content types |
-| `reject_content_types` | string | '' | Blacklist content types |
-| `max_response_bytes` | int | 10MB | Maximum response size |
-| `respect_robots_txt` | bool | true | Honor robots.txt |
-| `respect_nofollow` | bool | true | Skip rel=nofollow links |
-| `extract_js` | bool | false | Extract JS variables |
-| `sitemap_cache_hours` | float | 24.0 | Sitemap cache duration |
-
 ## Output Schema
 
-The output table contains standard columns plus EXTRACT aliases:
+The output table contains standard columns:
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -709,127 +492,37 @@ The output table contains standard columns plus EXTRACT aliases:
 | `opengraph` | JSON | Full OpenGraph data |
 | `meta` | JSON | Full meta tags |
 | `js` | JSON | Full JS variables |
-| `<alias>` | VARCHAR | EXTRACT columns |
 
 ## Examples
 
-### E-commerce Product Scraping
+### Basic Crawl
 
 ```sql
-CRAWL (SELECT 'https://shop.example.com/sitemap.xml')
-INTO products
-EXTRACT (
-    jsonld.Product.sku,
-    jsonld.Product.name | trim as name,
-    COALESCE(jsonld.Product.gtin13, microdata.Product.gtin) as gtin,
-    jsonld.Product.brand.name as brand,
-    price DECIMAL FROM jsonld.Product.offers.price,
-    jsonld.Product.offers.priceCurrency as currency,
-    jsonld.Product.offers.availability as stock_status,
-    jsonld.Product.image[0] as image
-)
-WHERE url LIKE '%/product/%'
-WITH (
-    user_agent 'PriceBot/1.0 (+https://mysite.com/bot)',
-    default_crawl_delay 0.5,
-    max_crawl_pages 5000
-);
+-- Crawl a website
+CRAWL (SELECT 'https://example.com/')
+INTO pages
+WITH (max_crawl_pages 100);
 
--- Analyze results
-SELECT
-    brand,
-    COUNT(*) as products,
-    printf('%.2f', AVG(price)) as avg_price
-FROM products
-WHERE price IS NOT NULL
-GROUP BY brand
-ORDER BY products DESC;
+-- Query the results
+SELECT url, status_code, jsonld FROM pages WHERE status_code = 200;
 ```
 
-### News Article Extraction
+### Crawl with Link Following
 
 ```sql
 CRAWL (SELECT 'https://news.example.com/')
 INTO articles
-EXTRACT (
-    jsonld.NewsArticle.headline as title,
-    jsonld.NewsArticle.datePublished as published,
-    jsonld.NewsArticle.author.name as author,
-    og.description as summary,
-    css 'article.content p::text' | trim as first_paragraph
-)
 WHERE url LIKE '%/article/%'
-WITH (
-    user_agent 'NewsBot/1.0',
-    follow_links true,
-    max_crawl_depth 2,
-    max_crawl_pages 500
-);
+WITH (follow_links true, max_crawl_depth 2, max_crawl_pages 500);
 ```
 
-### Finnish Grocery Store (Matsmart)
+### URL Filtering
 
 ```sql
-CRAWL (SELECT 'https://www.matsmart.fi/')
-INTO matsmart_products
-EXTRACT (
-    COALESCE(jsonld.Product.sku, microdata.Product.sku) as sku,
-    COALESCE(jsonld.Product.gtin, jsonld.Product.gtin13) as gtin,
-    jsonld.Product.name as name,
-    jsonld.Product.brand.name as brand,
-    price DECIMAL FROM jsonld.Product.offers.price,
-    jsonld.Product.offers.priceCurrency as currency,
-    jsonld.Product.offers.availability as availability,
-    unit_price VARCHAR FROM css '.unit-price::text' | trim,
-    jsonld.Product.image[0] as image_url
-)
-WHERE url LIKE 'https://www.matsmart.fi/tuote/%'
-WITH (
-    user_agent 'Mozilla/5.0 (compatible; PriceBot/1.0)',
-    follow_links true,
-    max_crawl_depth 3,
-    crawl_delay_ms 500
-)
-LIMIT 100;
-```
-
-### Price Monitoring Over Time
-
-```sql
--- Create monitoring table
-CREATE TABLE IF NOT EXISTS price_history (
-    sku VARCHAR,
-    price DECIMAL,
-    in_stock BOOLEAN,
-    checked_at TIMESTAMP
-);
-
--- Crawl and append prices
-INSERT INTO price_history
-SELECT
-    sku,
-    price::DECIMAL,
-    availability LIKE '%InStock%' as in_stock,
-    crawled_at as checked_at
-FROM (
-    CRAWL (SELECT url FROM monitored_products)
-    INTO _tmp_prices
-    EXTRACT (
-        jsonld.Product.sku as sku,
-        jsonld.Product.offers.price as price,
-        jsonld.Product.offers.availability as availability
-    )
-    WITH (user_agent 'PriceMonitor/1.0', timeout_seconds 15)
-);
-
--- Detect price changes
-SELECT
-    sku,
-    price,
-    LAG(price) OVER (PARTITION BY sku ORDER BY checked_at) as prev_price,
-    price - LAG(price) OVER (PARTITION BY sku ORDER BY checked_at) as change
-FROM price_history
-WHERE change != 0;
+CRAWL (SELECT 'https://shop.example.com/sitemap.xml')
+INTO products
+WHERE url LIKE '%/product/%'
+WITH (max_crawl_pages 1000);
 ```
 
 ## Error Handling

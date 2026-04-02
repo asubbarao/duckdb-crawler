@@ -296,6 +296,7 @@ static Value BuildHtmlStructValue(const string &body, const string &content_type
         string microdata_json = ExtractMicrodataWithRust(body);
         string schema_json = CombineSchemaData(jsonld_json, microdata_json);
         string readability_json = ExtractReadabilityWithRust(body, url);
+        string hydration_json = ExtractHydrationWithRust(body);
 
         html_values.push_back(make_pair("document", Value(body)));
         html_values.push_back(make_pair("js", MakeJsonValue(js_json)));
@@ -303,6 +304,7 @@ static Value BuildHtmlStructValue(const string &body, const string &content_type
         html_values.push_back(make_pair("opengraph", MakeJsonValue(og_json)));
         html_values.push_back(make_pair("schema", MakeSchemaMapValue(schema_json)));
         html_values.push_back(make_pair("readability", MakeJsonValue(readability_json)));
+        html_values.push_back(make_pair("hydration", MakeSchemaMapValue(hydration_json)));
 #else
         html_values.push_back(make_pair("document", Value(body)));
         html_values.push_back(make_pair("js", Value(LogicalType::JSON())));
@@ -310,6 +312,7 @@ static Value BuildHtmlStructValue(const string &body, const string &content_type
         html_values.push_back(make_pair("opengraph", Value(LogicalType::JSON())));
         html_values.push_back(make_pair("schema", Value::MAP(LogicalType::VARCHAR, LogicalType::JSON(), vector<Value>(), vector<Value>())));
         html_values.push_back(make_pair("readability", Value(LogicalType::JSON())));
+        html_values.push_back(make_pair("hydration", Value::MAP(LogicalType::VARCHAR, LogicalType::JSON(), vector<Value>(), vector<Value>())));
 #endif
     } else {
         html_values.push_back(make_pair("document", body.empty() ? Value() : Value(body)));
@@ -318,6 +321,7 @@ static Value BuildHtmlStructValue(const string &body, const string &content_type
         html_values.push_back(make_pair("opengraph", Value(LogicalType::JSON())));
         html_values.push_back(make_pair("schema", Value::MAP(LogicalType::VARCHAR, LogicalType::JSON(), vector<Value>(), vector<Value>())));
         html_values.push_back(make_pair("readability", Value(LogicalType::JSON())));
+        html_values.push_back(make_pair("hydration", Value::MAP(LogicalType::VARCHAR, LogicalType::JSON(), vector<Value>(), vector<Value>())));
     }
 
     return Value::STRUCT(std::move(html_values));
@@ -544,6 +548,7 @@ static unique_ptr<FunctionData> CrawlUrlBind(ClientContext &context, TableFuncti
     html_struct.push_back(make_pair("opengraph", LogicalType::JSON())); // JSON type
     html_struct.push_back(make_pair("schema", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::JSON())));  // MAP for schema['Product'] access
     html_struct.push_back(make_pair("readability", LogicalType::JSON()));  // Readability extracted content
+    html_struct.push_back(make_pair("hydration", LogicalType::MAP(LogicalType::VARCHAR, LogicalType::JSON())));  // SPA hydration state
     return_types.push_back(LogicalType::STRUCT(html_struct));
 
     return_types.push_back(LogicalType::VARCHAR);  // final_url

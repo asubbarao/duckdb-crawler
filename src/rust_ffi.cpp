@@ -55,6 +55,8 @@ extern "C" {
     // table_index: 0-based index of which matching element to extract
     ExtractionResultFFI extract_table_ffi(const char *html_ptr, size_t html_len,
                                            const char *selector, const char *url, size_t table_index);
+    // SPA hydration state extraction (Next.js, Nuxt, Pinia, Apollo)
+    ExtractionResultFFI extract_hydration_ffi(const char *html_ptr, size_t html_len);
 }
 
 namespace duckdb {
@@ -157,6 +159,13 @@ std::string PageInfoWithRust(const std::string &html, const std::string &url) {
 std::string ExtractReadabilityWithRust(const std::string &html, const std::string &url) {
     if (html.empty()) return "{}";
     auto ffi_result = extract_readability_ffi(html.c_str(), html.length(), url.c_str());
+    RustResult result(ffi_result);
+    return result.HasError() ? "{}" : result.GetJson();
+}
+
+std::string ExtractHydrationWithRust(const std::string &html) {
+    if (html.empty()) return "{}";
+    auto ffi_result = extract_hydration_ffi(html.c_str(), html.length());
     RustResult result(ffi_result);
     return result.HasError() ? "{}" : result.GetJson();
 }
@@ -345,6 +354,11 @@ std::string PageInfoWithRust(const std::string &html, const std::string &url) {
 std::string ExtractReadabilityWithRust(const std::string &html, const std::string &url) {
     (void)html;
     (void)url;
+    return "{}";
+}
+
+std::string ExtractHydrationWithRust(const std::string &html) {
+    (void)html;
     return "{}";
 }
 
