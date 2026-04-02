@@ -103,10 +103,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	}
 
 	// Register CRAWL and STREAM parser extension
-	ParserExtension parser_ext;
-	parser_ext.parse_function = CrawlParserExtension::ParseCrawl;
-	parser_ext.plan_function = CrawlParserExtension::PlanCrawl;
-	config.parser_extensions.push_back(std::move(parser_ext));
+	// Disabled: parser_extensions made private in DuckDB 1.2+
+	// Use crawl()/crawl_url() table functions instead
+	(void)config;
 }
 
 void CrawlerExtension::Load(ExtensionLoader &loader) {
