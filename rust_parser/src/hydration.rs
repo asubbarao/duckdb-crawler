@@ -261,10 +261,52 @@ pub fn parse_js_value(source: &str, node: tree_sitter::Node) -> Option<Value> {
             // Use json5 to parse JS object/array literals (handles unquoted keys, trailing commas)
             json5::from_str(text).ok()
         }
-        // For complex expressions (function calls, template literals, etc.)
-        // try json5 as a last resort
+        // JSON.parse("...") — extract the string argument and parse it
+        "call_expression" => {
+            parse_json_parse_call(source, node)
+        }
+        // For other expressions, try json5 as a last resort
         _ => json5::from_str(text).ok(),
     }
+}
+
+/// Handle JSON.parse("...") call expressions.
+/// Extracts the string argument, unescapes it, and parses as JSON.
+fn parse_json_parse_call(source: &str, node: tree_sitter::Node) -> Option<Value> {
+    // Check if this is JSON.parse(...)
+    let func = node.child_by_field_name("function")?;
+    let func_text = &source[func.byte_range()];
+    if func_text != "JSON.parse" {
+        return None;
+    }
+
+    // Get the arguments node
+    let args = node.child_by_field_name("arguments")?;
+
+    // Find the first string argument and use serde_json to properly unescape it
+    let mut cursor = args.walk();
+    for child in args.children(&mut cursor) {
+        if child.kind() == "string" {
+            let raw = &source[child.byte_range()];
+            // The raw text is a JS string literal like "..." or '...'
+            // serde_json can parse double-quoted JSON strings with proper escape handling
+            if raw.starts_with('"') {
+                // Parse the string literal to get the unescaped content
+                if let Ok(Value::String(unescaped)) = serde_json::from_str(raw) {
+                    // Now parse the unescaped content as JSON
+                    return serde_json::from_str(&unescaped).ok();
+                }
+            } else if raw.starts_with('\'') {
+                // Single-quoted: convert to double-quoted for serde_json
+                let inner = &raw[1..raw.len().saturating_sub(1)];
+                let double_quoted = format!("\"{}\"", inner);
+                if let Ok(Value::String(unescaped)) = serde_json::from_str(&double_quoted) {
+                    return serde_json::from_str(&unescaped).ok();
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Check if a JSON array looks like devalue format.
