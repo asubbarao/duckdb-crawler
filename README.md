@@ -9,18 +9,17 @@ A high-performance web crawler extension for DuckDB that fetches web pages, extr
 INSTALL crawler FROM community;
 LOAD crawler;
 
--- Simple crawl
-CRAWL (SELECT 'https://example.com/')
-INTO pages
-WITH (max_crawl_pages 10);
-
--- View results
-SELECT url, status_code, length(body) as size FROM pages;
+-- One URL. Named param `timeout` is seconds (default 30).
+-- Distinct from SET crawler_timeout_ms (milliseconds).
+SELECT url, status, length(html.document) AS size
+FROM crawl('https://example.com/', timeout := 30);
 ```
+
+Stock community `LOAD crawler` registers table functions (`crawl`, `crawl_url`, `sitemap`, …). It does **not** register a `CRAWL` statement — `CRAWL (SELECT …) INTO …` is a parser error. This source tree’s parser (`src/crawl_parser.cpp`) is **MERGE-only** (`CRAWLING MERGE INTO`), and that registration is currently disabled (`parser_extensions` private in DuckDB 1.2+).
 
 ## Features
 
-- **Native SQL syntax** - `CRAWL` statement integrates seamlessly with DuckDB
+- **SQL table functions** - `crawl()`, `crawl_url()`, `sitemap()` with named parameters
 - **HTTP/1.1, HTTP/2** support via reqwest (Rust)
 - **Parallel crawling** with configurable thread pools
 - **robots.txt compliance** with crawl delay respect
@@ -40,14 +39,8 @@ SELECT url, status_code, length(body) as size FROM pages;
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                         CRAWL Statement                         │
-│         CRAWL (SELECT urls) INTO table WHERE ... WITH           │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    DuckDB Parser Extension                      │
-│      Parses CRAWL/INTO/WHERE/WITH into execution plan          │
+│              Table functions (community LOAD crawler)           │
+│     crawl(url | urls, timeout := …)  crawl_url()  sitemap()     │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -85,15 +78,15 @@ SELECT url, status_code, length(body) as size FROM pages;
 
 ### 1. URL Discovery
 
-The crawler starts with seed URLs from the subquery:
+The crawler starts with seed URLs from `crawl()` / `crawl_url()`:
 
 ```sql
-CRAWL (SELECT 'https://example.com/sitemap.xml')  -- Direct URLs
-CRAWL (SELECT url FROM my_urls)                    -- From table
-CRAWL (SELECT 'example.com')                       -- Auto-discover sitemap
+SELECT * FROM crawl('https://example.com/sitemap.xml', timeout := 30);
+SELECT * FROM crawl(['https://example.com/a', 'https://example.com/b']);
+SELECT * FROM sitemap('https://example.com/sitemap.xml', discover := true);
 ```
 
-If `follow_links` is enabled, it parses HTML for `<a href>` links and adds them to the queue, respecting `max_crawl_depth` and same-domain rules.
+If `follow` is a CSS selector, the crawler extracts matching links and queues them, respecting `max_depth`.
 
 ### 2. HTTP Fetching (reqwest)
 
@@ -164,7 +157,36 @@ duckdb -unsigned -c "LOAD 'build/release/extension/crawler/crawler.duckdb_extens
 
 ## Table Functions
 
-### crawl_url() - LATERAL Join Support
+These are what community `LOAD crawler` actually registers. Named parameter `timeout` is **seconds** on every TVF (binder multiplies by 1000). Session default is `SET crawler_timeout_ms` (**milliseconds**, default 30000).
+
+### crawl() — batch crawl
+
+```sql
+SELECT url, status, length(html.document) AS size
+FROM crawl('https://example.com/', timeout := 30);
+
+SELECT url, status
+FROM crawl(['https://example.com/a', 'https://example.com/b'],
+           timeout := 15, max_results := 10, respect_robots := true);
+```
+
+| Named param | Type | Description |
+|-------------|------|-------------|
+| `timeout` | INTEGER | HTTP request timeout **in seconds** (not ms) |
+| `max_results` | BIGINT | Cap on pages returned (LIMIT pushdown) |
+| `max_depth` | INTEGER | Max link-follow depth (`1` = seeds only) |
+| `workers` | INTEGER | Concurrent requests |
+| `delay` | INTEGER | Per-domain delay stored as milliseconds |
+| `respect_robots` | BOOLEAN | Honor robots.txt |
+| `cache` | BOOLEAN | HTTP response cache |
+| `cache_ttl` | INTEGER | Cache TTL in hours |
+| `user_agent` | VARCHAR | User-Agent header |
+| `extract` | LIST(VARCHAR) | Extraction specs |
+| `follow` | VARCHAR | CSS selector for links to follow |
+| `batch_size` | INTEGER | URLs per fetch batch |
+| `state_table` | VARCHAR | Persistent crawl-state table |
+
+### crawl_url() — LATERAL join support
 
 Use `crawl_url()` for row-by-row crawling with LATERAL joins:
 
@@ -173,33 +195,52 @@ Use `crawl_url()` for row-by-row crawling with LATERAL joins:
 SELECT
     seed.category,
     c.url,
-    c.status_code,
+    c.status,
     c.html.readability.title
 FROM seed_urls seed,
-LATERAL crawl_url(seed.url) AS c
-WHERE c.status_code = 200;
+LATERAL crawl_url(seed.url, timeout := 30) AS c
+WHERE c.status = 200;
 
 -- Chain with extraction
 SELECT
     c.final_url,
-    jq(c.body, 'h1').text as title,
+    jq(c.html.document, 'h1').text as title,
     c.html.schema['Product'] as product_data
 FROM urls_to_check u,
-LATERAL crawl_url(u.link) AS c;
+LATERAL crawl_url(u.link, timeout := 15) AS c;
 ```
 
-### sitemap() - Sitemap Parsing
+| Named param | Type | Description |
+|-------------|------|-------------|
+| `timeout` | INTEGER | HTTP request timeout **in seconds** |
+| `max_results` | BIGINT | Cap on results (also a 2nd positional arg in LATERAL) |
+| `cache` | BOOLEAN | HTTP response cache |
+| `cache_ttl` | INTEGER | Cache TTL in hours |
+| `user_agent` | VARCHAR | User-Agent header |
+| `extract` | LIST(VARCHAR) | Extraction specs |
+
+### sitemap() — sitemap parsing
 
 Parse XML sitemaps (supports gzip, recursive sitemap indexes):
 
 ```sql
 -- Get all URLs from sitemap
-SELECT * FROM sitemap('https://example.com/sitemap.xml');
+SELECT * FROM sitemap('https://example.com/sitemap.xml', timeout := 30);
 
 -- Recursive sitemap discovery
 SELECT url, lastmod, priority
-FROM sitemap('https://example.com/sitemap_index.xml', recursive := true);
+FROM sitemap('https://example.com/sitemap_index.xml',
+             recursive := true, timeout := 30);
 ```
+
+| Named param | Type | Description |
+|-------------|------|-------------|
+| `timeout` | INTEGER | HTTP request timeout **in seconds** |
+| `recursive` | BOOLEAN | Follow sitemap indexes |
+| `max_depth` | INTEGER | Max index recursion depth |
+| `discover` | BOOLEAN | Discover sitemap URL from robots.txt |
+| `filter` | VARCHAR | URL filter |
+| `user_agent` | VARCHAR | User-Agent header |
 
 ## Extraction Functions
 
@@ -240,7 +281,7 @@ SELECT htmlpath('<a href="/page">Link</a>', 'a@href');
 
 -- Extract from JSON-LD
 SELECT htmlpath(body, 'script[type="application/ld+json"]@text.Product.name')
-FROM pages WHERE status_code = 200;
+FROM pages WHERE status = 200;
 
 -- Extract multiple elements (returns JSON array)
 SELECT htmlpath(body, 'a.product@href[*]') FROM pages;
@@ -323,7 +364,9 @@ Supported extraction patterns:
 
 ## CRAWLING MERGE INTO
 
-Upsert crawl results with MERGE semantics. Supports conditional updates and handling of stale rows:
+Parser syntax in this source tree only (`CRAWLING MERGE INTO`, not `CRAWL INTO`). **Not registered** on stock community `LOAD crawler` (parser error at `CRAWLING`). On community, use DuckDB `MERGE` / `INSERT` over `crawl()`.
+
+When the parser is enabled, upsert crawl results with MERGE semantics:
 
 ```sql
 -- Basic upsert: update existing, insert new
@@ -345,7 +388,7 @@ USING (
     FROM crawl(['https://jobs.example.com/listings']) AS listing,
     LATERAL unnest(cast(htmlpath(listing.body, 'a.job@href[*]') as VARCHAR[])) AS t(job_url),
     LATERAL crawl_url(job_url) AS c
-    WHERE c.status_code = 200
+    WHERE c.status = 200
 ) AS src
 ON (src.url = jobs.url)
 WHEN MATCHED AND age(jobs.crawled_at) > INTERVAL '24 hours' THEN UPDATE BY NAME
@@ -394,7 +437,8 @@ SET crawler_default_delay = 1.0;
 -- Respect robots.txt (default: true)
 SET crawler_respect_robots = true;
 
--- Request timeout (milliseconds)
+-- Session default request timeout (milliseconds).
+-- Per-call override is crawl(..., timeout := seconds), not this name.
 SET crawler_timeout_ms = 30000;
 
 -- Maximum response size (bytes)
@@ -408,7 +452,7 @@ SET crawler_max_response_bytes = 10485760;  -- 10MB
 | `crawler_user_agent` | VARCHAR | required | HTTP User-Agent header |
 | `crawler_default_delay` | DOUBLE | 1.0 | Delay between requests (seconds) |
 | `crawler_respect_robots` | BOOLEAN | true | Honor robots.txt |
-| `crawler_timeout_ms` | INTEGER | 30000 | Request timeout |
+| `crawler_timeout_ms` | BIGINT | 30000 | Default request timeout **in milliseconds**. TVF named param `timeout` is **seconds**. |
 | `crawler_max_response_bytes` | INTEGER | 10485760 | Max response size |
 
 ## Proxy Support
@@ -448,81 +492,62 @@ See the `examples/` directory for complete working examples:
 | `examples/crawl_blog_posts.sql` | Blog article extraction with readability |
 | `examples/crawl_events.sql` | Event page crawling with Event schema |
 
-## CRAWL Statement Syntax
+## CRAWL statement (not on community)
+
+`CRAWL (SELECT …) INTO … WITH (…)` is **not** registered. On stock community:
 
 ```sql
-CRAWL (subquery)
-INTO table_name
-[WHERE url_filter]
-[WITH (options)]
-[LIMIT n]
+-- Parser Error: syntax error at or near "CRAWL"
+CRAWL (SELECT 'https://example.com/') INTO pages;
 ```
 
-### Components
-
-| Clause | Required | Description |
-|--------|----------|-------------|
-| `CRAWL (subquery)` | Yes | Source URLs - any SELECT returning URL strings |
-| `INTO table_name` | Yes | Target table (created if not exists) |
-| `WHERE condition` | No | URL filter applied before fetching |
-| `WITH (options)` | No | Crawler configuration |
-| `LIMIT n` | No | Maximum pages to crawl |
+`src/crawl_parser.cpp` handles **`CRAWLING MERGE INTO` only** (not `CRAWL INTO`). That parser is not loaded today (`parser_extensions` private in DuckDB 1.2+). Persist results with `CREATE TABLE AS` / `INSERT` / DuckDB `MERGE` over `crawl()` / `crawl_url()`.
 
 ## Output Schema
 
-The output table contains standard columns:
+`crawl()` / `crawl_url()` return:
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `url` | VARCHAR | Fetched URL |
-| `surt_key` | VARCHAR | SURT-normalized URL (Common Crawl format) |
-| `status_code` | INTEGER | HTTP status code |
-| `body` | VARCHAR | Response body |
+| `status` | INTEGER | HTTP status code |
 | `content_type` | VARCHAR | Content-Type header |
-| `crawled_at` | TIMESTAMP | Fetch timestamp |
-| `elapsed_ms` | BIGINT | Request duration |
-| `error` | VARCHAR | Error message if failed |
-| `error_type` | VARCHAR | Classified error type |
+| `html` | STRUCT | `document`, `js`, `meta`, `opengraph`, `schema`, `readability`, `hydration` |
 | `final_url` | VARCHAR | URL after redirects |
-| `redirect_count` | INTEGER | Number of redirects |
-| `etag` | VARCHAR | ETag header |
-| `last_modified` | VARCHAR | Last-Modified header |
-| `content_hash` | VARCHAR | SHA-256 of body |
-| `jsonld` | JSON | Full JSON-LD data |
-| `opengraph` | JSON | Full OpenGraph data |
-| `meta` | JSON | Full meta tags |
-| `js` | JSON | Full JS variables |
+| `error` | VARCHAR | Error message if failed |
+| `extract` | VARCHAR | Result of `extract` specs |
+| `response_time_ms` | BIGINT | Request duration |
+| `depth` | INTEGER | Crawl depth from seed |
 
 ## Examples
 
 ### Basic Crawl
 
 ```sql
--- Crawl a website
-CRAWL (SELECT 'https://example.com/')
-INTO pages
-WITH (max_crawl_pages 100);
+CREATE TABLE pages AS
+SELECT * FROM crawl('https://example.com/', timeout := 30, max_results := 100);
 
--- Query the results
-SELECT url, status_code, jsonld FROM pages WHERE status_code = 200;
+SELECT url, status, html.schema FROM pages WHERE status = 200;
 ```
 
 ### Crawl with Link Following
 
 ```sql
-CRAWL (SELECT 'https://news.example.com/')
-INTO articles
-WHERE url LIKE '%/article/%'
-WITH (follow_links true, max_crawl_depth 2, max_crawl_pages 500);
+SELECT * FROM crawl(
+    'https://news.example.com/',
+    follow := 'a[href]',
+    max_depth := 2,
+    max_results := 500,
+    timeout := 30
+);
 ```
 
 ### URL Filtering
 
 ```sql
-CRAWL (SELECT 'https://shop.example.com/sitemap.xml')
-INTO products
-WHERE url LIKE '%/product/%'
-WITH (max_crawl_pages 1000);
+SELECT s.url
+FROM sitemap('https://shop.example.com/sitemap.xml',
+             filter := '%/product/%', timeout := 30) s;
 ```
 
 ## Error Handling
@@ -543,13 +568,10 @@ Errors are classified for easy filtering:
 | `content_type_rejected` | Content-Type filtered |
 
 ```sql
--- Retry failed URLs
-CRAWL (
-    SELECT url FROM my_crawl
-    WHERE error_type = 'network_timeout'
-)
-INTO my_crawl_retry
-WITH (user_agent 'MyBot/1.0', timeout_seconds 60);
+-- Retry failed URLs (timeout := seconds)
+SELECT c.*
+FROM my_crawl t, LATERAL crawl_url(t.url, timeout := 60, user_agent := 'MyBot/1.0') c
+WHERE t.error = 'network_timeout';
 ```
 
 ## Performance

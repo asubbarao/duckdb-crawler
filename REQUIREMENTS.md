@@ -35,7 +35,7 @@
 
 - Default thread count: DuckDB's `threads` setting (via `current_setting('threads')`)
 - Capped at 32 threads maximum, minimum 1
-- Configurable via `threads` parameter in WITH clause
+- Configurable via `crawl(..., workers := n)` (not a `CRAWL … WITH` clause on community)
 - Per-domain rate limiting preserved across all threads
 - Global connection limit via `max_total_connections`
 - Per-domain parallelism limit via `max_parallel_per_domain`
@@ -64,8 +64,8 @@
 - Cache discovered URLs with metadata (lastmod, changefreq)
 
 ### Link-Following (Optional)
-- BFS crawl from start URL when enabled (`follow_links = true`)
-- Respect `max_crawl_depth` and `max_crawl_pages`
+- BFS crawl from start URL when `follow` is a CSS selector
+- Respect `max_depth` and `max_results`
 - Honor `rel="nofollow"` when `respect_nofollow = true`
 - Follow canonical URLs when `follow_canonical = true`
 
@@ -116,16 +116,35 @@ Crawler reads these settings from DuckDB configuration at crawl start:
 
 | Setting | Description | Default |
 |---------|-------------|---------|
-| `threads` | Number of worker threads | varies |
-| `http_timeout` | Request timeout in seconds | 30 |
-| `http_keep_alive` | Enable connection keep-alive | true |
+| `crawler_user_agent` | User-Agent header | `DuckDB-Crawler/1.0` |
+| `crawler_default_delay` | Default crawl delay **in seconds** | 1.0 |
+| `crawler_timeout_ms` | Default HTTP timeout **in milliseconds** | 30000 |
+| `crawler_respect_robots` | Honor robots.txt | true |
+| `crawler_max_response_bytes` | Max response body size | 10485760 |
 | `http_proxy` | HTTP proxy host | empty |
 | `http_proxy_username` | Proxy authentication username | empty |
 | `http_proxy_password` | Proxy authentication password | empty |
 
-Example:
+Per-call override: TVF named param `timeout` is **seconds** (`timeout := 30` → 30000 ms). Do not pass `crawler_timeout_ms` as a named argument.
+
+`CRAWL (SELECT …) INTO` parser-errors on stock community. Use table functions:
+
 ```sql
-SET http_timeout = 60;
+SET crawler_timeout_ms = 60000;  -- milliseconds, session default
 SET http_proxy = 'http://proxy.example.com:8080';
-CRAWL (SELECT 'https://example.com/') INTO pages;
+SELECT * FROM crawl('https://example.com/', timeout := 60);  -- seconds, this call
 ```
+
+## Named parameters (community `LOAD crawler`)
+
+### crawl()
+
+`timeout`, `max_results`, `max_depth`, `workers`, `delay`, `respect_robots`, `cache`, `cache_ttl`, `user_agent`, `extract`, `follow`, `batch_size`, `state_table`
+
+### crawl_url()
+
+`timeout`, `max_results`, `cache`, `cache_ttl`, `user_agent`, `extract`
+
+### sitemap()
+
+`timeout`, `recursive`, `max_depth`, `discover`, `filter`, `user_agent`
