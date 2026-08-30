@@ -1,4 +1,7 @@
 #include "crawler_utils.hpp"
+#include "duckdb.hpp"
+#include "duckdb/main/client_config.hpp"
+#include "duckdb/main/client_context.hpp"
 #include <zlib.h>
 #include <algorithm>
 #include <chrono>
@@ -15,6 +18,39 @@
 #endif
 
 namespace duckdb {
+
+static int TimeoutMsFromValue(const Value &v) {
+	if (v.IsNull()) {
+		return 0;
+	}
+	int64_t ms = v.DefaultCastAs(LogicalType::BIGINT).GetValue<int64_t>();
+	if (ms <= 0) {
+		return 0;
+	}
+	if (ms > 2147483647) {
+		return 2147483647;
+	}
+	return static_cast<int>(ms);
+}
+
+int GetCrawlerTimeoutMs(ClientContext &context) {
+	auto &client_config = ClientConfig::GetConfig(context);
+	auto session = client_config.set_variables.find("crawler_timeout_ms");
+	if (session != client_config.set_variables.end()) {
+		int ms = TimeoutMsFromValue(session->second);
+		if (ms > 0) {
+			return ms;
+		}
+	}
+	Value setting_value;
+	if (context.TryGetCurrentSetting("crawler_timeout_ms", setting_value)) {
+		int ms = TimeoutMsFromValue(setting_value);
+		if (ms > 0) {
+			return ms;
+		}
+	}
+	return 30000;
+}
 
 //===--------------------------------------------------------------------===//
 // Error Classification

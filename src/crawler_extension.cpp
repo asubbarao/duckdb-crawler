@@ -57,7 +57,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register crawler_timeout_ms setting
 	config.AddExtensionOption("crawler_timeout_ms",
-	                          "HTTP request timeout in milliseconds",
+	                          "Hard HTTP deadline for crawl()/crawl_url()/sitemap() in milliseconds. "
+	                          "Named timeout parameter is seconds.",
 	                          LogicalType::BIGINT,
 	                          Value::BIGINT(30000));
 
