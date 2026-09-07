@@ -2,6 +2,7 @@
 # description: SET crawler_timeout_ms is milliseconds and is session-visible
 # group: [crawler]
 # hang/deadline behavior is covered by rust_parser sitemap + ffi timeout tests
+# read_html/crawl/sitemap bind+execute re-read this setting via GetCrawlerTimeoutMs
 
 require crawler
 
