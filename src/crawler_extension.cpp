@@ -103,10 +103,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 		SetInterrupted(false);
 	}
 
-	// Register CRAWL and STREAM parser extension
-	// Disabled: parser_extensions made private in DuckDB 1.2+
-	// Use crawl()/crawl_url() table functions instead
-	(void)config;
+	// CRAWLING MERGE INTO — PEG treats the leading identifier as an
+	// ExpressionStatement and fails at MERGE. parse_function claims the tokens.
+	ParserExtension::Register(config, CrawlParserExtension());
 }
 
 void CrawlerExtension::Load(ExtensionLoader &loader) {
