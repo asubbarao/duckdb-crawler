@@ -89,10 +89,10 @@ SELECT (page_info(
 
 # Test page_info() readability has title key
 query I
-SELECT page_info(
+SELECT (page_info(
     '<html><body><article><p>Hello world</p></article></body></html>',
     'http://example.com'
-)->'readability'->>'title' IS NOT NULL;
+)->'readability'->>'title') IS NOT NULL;
 ----
 true
 
