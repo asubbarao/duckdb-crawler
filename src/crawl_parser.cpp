@@ -393,30 +393,37 @@ CrawlParserExtension::CrawlParserExtension() {
 
 ParserExtensionParseResult CrawlParserExtension::ParseCrawl(ParserExtensionInfo *info,
                                                             const vector<SimpleToken> &tokens) {
-	if (tokens.empty()) {
+	if (tokens.size() < 3) {
 		return ParserExtensionParseResult();
 	}
+	if (!StringUtil::CIEquals(tokens[0].text, "crawling") || !StringUtil::CIEquals(tokens[1].text, "merge") ||
+	    !StringUtil::CIEquals(tokens[2].text, "into")) {
+		return ParserExtensionParseResult();
+	}
+
 	string query;
+	idx_t consumed = 0;
 	for (auto &tok : tokens) {
+		consumed++;
+		if (tok.type == TokenType::END_OF_INPUT || tok.type == TokenType::END_OF_INPUT_AUTOCOMPLETE) {
+			break;
+		}
+		if (tok.type == TokenType::TERMINATOR) {
+			break;
+		}
 		if (!query.empty()) {
 			query += " ";
 		}
 		query += tok.text;
 	}
-	string trimmed = Trim(query);
-	string lower = StringUtil::Lower(trimmed);
 
-	if (StringUtil::StartsWith(lower, "crawling merge into")) {
-		auto result = ParseCrawlingMerge(trimmed);
-		if (result.type == ParserExtensionResultType::PARSE_SUCCESSFUL) {
-			result.consumed_tokens = static_cast<int64_t>(tokens.size());
-		} else {
-			result.consumed_tokens = -1;
-		}
-		return result;
+	auto result = ParseCrawlingMerge(query);
+	if (result.type == ParserExtensionResultType::PARSE_SUCCESSFUL) {
+		result.consumed_tokens = static_cast<int64_t>(consumed);
+	} else {
+		result.consumed_tokens = -1;
 	}
-
-	return ParserExtensionParseResult();
+	return result;
 }
 
 ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *info, ClientContext &context,
