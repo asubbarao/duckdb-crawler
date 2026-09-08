@@ -5,7 +5,7 @@ use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn tokio_runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -705,8 +705,109 @@ fn extract_domain(url: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Per-domain rate limiter
-type DomainRateLimiter = Arc<Mutex<HashMap<String, std::time::Instant>>>;
+const MAX_BACKOFF_SECS: u64 = 600;
+
+/// Per-domain gate: crawl-delay reservation + 429 block.
+#[derive(Debug)]
+struct DomainLimitState {
+    next_allowed: Instant,
+    blocked_until: Option<Instant>,
+    consecutive_429s: u32,
+}
+
+impl DomainLimitState {
+    fn new(now: Instant) -> Self {
+        Self {
+            next_allowed: now,
+            blocked_until: None,
+            consecutive_429s: 0,
+        }
+    }
+
+    fn gate(&self) -> Instant {
+        match self.blocked_until {
+            Some(b) => self.next_allowed.max(b),
+            None => self.next_allowed,
+        }
+    }
+}
+
+/// Per-domain rate limiter (shared across concurrent batch tasks).
+type DomainRateLimiter = Arc<Mutex<HashMap<String, DomainLimitState>>>;
+
+fn fib_backoff_secs(n: u32) -> u64 {
+    if n <= 2 {
+        return 1.min(MAX_BACKOFF_SECS);
+    }
+    let mut a = 1u64;
+    let mut b = 1u64;
+    for _ in 3..=n {
+        let next = a.saturating_add(b);
+        a = b;
+        b = next;
+        if b >= MAX_BACKOFF_SECS {
+            return MAX_BACKOFF_SECS;
+        }
+    }
+    b.min(MAX_BACKOFF_SECS)
+}
+
+/// Parse Retry-After delta-seconds. HTTP-date is not supported here.
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    let secs: u64 = value.trim().parse().ok()?;
+    Some(Duration::from_secs(secs))
+}
+
+/// Reserve the next crawl-delay slot under the lock, then sleep outside it.
+/// Fixes the stale last-access race (check→unlock→sleep→relock).
+async fn acquire_domain(limiter: &DomainRateLimiter, domain: &str, delay: Duration) {
+    loop {
+        let sleep_for = {
+            let mut map = limiter.lock().await;
+            let now = Instant::now();
+            let state = map
+                .entry(domain.to_string())
+                .or_insert_with(|| DomainLimitState::new(now));
+            let ready_at = state.gate();
+            if now < ready_at {
+                Some(ready_at.saturating_duration_since(now))
+            } else {
+                state.next_allowed = now + delay;
+                None
+            }
+        };
+        match sleep_for {
+            None => return,
+            Some(d) if d.is_zero() => tokio::task::yield_now().await,
+            Some(d) => tokio::time::sleep(d).await,
+        }
+    }
+}
+
+async fn note_429(limiter: &DomainRateLimiter, domain: &str, retry_after: Option<Duration>) {
+    let mut map = limiter.lock().await;
+    let now = Instant::now();
+    let state = map
+        .entry(domain.to_string())
+        .or_insert_with(|| DomainLimitState::new(now));
+    state.consecutive_429s = state.consecutive_429s.saturating_add(1);
+    let backoff = retry_after
+        .unwrap_or_else(|| Duration::from_secs(fib_backoff_secs(state.consecutive_429s)))
+        .min(Duration::from_secs(MAX_BACKOFF_SECS));
+    let until = now + backoff;
+    state.blocked_until = Some(until);
+    if state.next_allowed < until {
+        state.next_allowed = until;
+    }
+}
+
+async fn note_success(limiter: &DomainRateLimiter, domain: &str) {
+    let mut map = limiter.lock().await;
+    if let Some(state) = map.get_mut(domain) {
+        state.blocked_until = None;
+        state.consecutive_429s = 0;
+    }
+}
 
 /// Single crawl result
 #[derive(Debug, serde::Serialize)]
@@ -768,36 +869,11 @@ async fn fetch_and_extract_inner(
     rate_limiter: &DomainRateLimiter,
     delay_ms: u64,
 ) -> CrawlResult {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
+    let domain = extract_domain(&url);
 
-    // Apply per-domain rate limiting
-    if delay_ms > 0 {
-        let domain = extract_domain(&url);
-        let delay = Duration::from_millis(delay_ms);
-
-        let wait_time = {
-            let limiter = rate_limiter.lock().await;
-            if let Some(last_access) = limiter.get(&domain) {
-                let elapsed = last_access.elapsed();
-                if elapsed < delay {
-                    Some(delay - elapsed)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        if let Some(wait) = wait_time {
-            tokio::time::sleep(wait).await;
-        }
-
-        // Update last access time
-        {
-            let mut limiter = rate_limiter.lock().await;
-            limiter.insert(domain, std::time::Instant::now());
-        }
+    if !domain.is_empty() {
+        acquire_domain(rate_limiter, &domain, Duration::from_millis(delay_ms)).await;
     }
 
     match client.get(&url).send().await {
@@ -811,8 +887,34 @@ async fn fetch_and_extract_inner(
                 .unwrap_or("")
                 .to_string();
 
+            if status == 429 {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(parse_retry_after);
+                if !domain.is_empty() {
+                    note_429(rate_limiter, &domain, retry_after).await;
+                }
+                let _ = response.bytes().await;
+                return CrawlResult {
+                    url,
+                    final_url,
+                    status,
+                    content_type,
+                    body: String::new(),
+                    error: Some("HTTP 429 Too Many Requests".to_string()),
+                    extracted: None,
+                    response_time_ms: start.elapsed().as_millis() as u64,
+                };
+            }
+
             match response.text().await {
                 Ok(body) => {
+                    if (200..400).contains(&status) && !domain.is_empty() {
+                        note_success(rate_limiter, &domain).await;
+                    }
+
                     let extracted = if let Some(req) = extraction {
                         let result = extract_all(&body, req);
                         // Convert HashMap to JSON Value
