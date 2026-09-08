@@ -263,7 +263,7 @@ struct CrawlingMergeGlobalState : public GlobalTableFunctionState {
 //===--------------------------------------------------------------------===//
 
 static unique_ptr<FunctionData> CrawlingMergeBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<string> &names) {
+                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto bind_data = make_uniq<CrawlingMergeBindData>();
 
 	// Parameters from parser (see PlanCrawl in crawl_parser.cpp)
@@ -531,8 +531,11 @@ static void CrawlingMergeFunction(ClientContext &context, TableFunctionInput &da
 	}
 
 	// Get column names and types from result
-	vector<string> col_names = query_result->names;
-	vector<LogicalType> col_types = query_result->types;
+	vector<string> col_names;
+	for (auto &n : query_result->GetNames()) {
+		col_names.push_back(n.GetIdentifierName());
+	}
+	vector<LogicalType> col_types = query_result->GetTypes();
 
 	// Collect all chunks first to know total (enables progress bar)
 	vector<unique_ptr<DataChunk>> all_chunks;

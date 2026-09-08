@@ -1,6 +1,5 @@
 #include "crawler_utils.hpp"
 #include "duckdb.hpp"
-#include "duckdb/main/client_config.hpp"
 #include "duckdb/main/client_context.hpp"
 #include <zlib.h>
 #include <algorithm>
@@ -34,14 +33,6 @@ static int TimeoutMsFromValue(const Value &v) {
 }
 
 int GetCrawlerTimeoutMs(ClientContext &context) {
-	auto &client_config = ClientConfig::GetConfig(context);
-	auto session = client_config.set_variables.find("crawler_timeout_ms");
-	if (session != client_config.set_variables.end()) {
-		int ms = TimeoutMsFromValue(session->second);
-		if (ms > 0) {
-			return ms;
-		}
-	}
 	Value setting_value;
 	if (context.TryGetCurrentSetting("crawler_timeout_ms", setting_value)) {
 		int ms = TimeoutMsFromValue(setting_value);

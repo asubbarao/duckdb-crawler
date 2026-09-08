@@ -140,7 +140,7 @@ static vector<SitemapEntry> ParseSitemapResponse(const string &json, const strin
 static unique_ptr<FunctionData> SitemapBind(ClientContext &context,
                                              TableFunctionBindInput &input,
                                              vector<LogicalType> &return_types,
-                                             vector<string> &names) {
+                                             vector<Identifier> &names) {
     auto bind_data = make_uniq<SitemapBindData>();
 
     // First argument is the sitemap URL
