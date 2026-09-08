@@ -64,7 +64,7 @@ class CrawlParserExtension : public ParserExtension {
 public:
 	CrawlParserExtension();
 
-	static ParserExtensionParseResult ParseCrawl(ParserExtensionInfo *info, const string &query);
+	static ParserExtensionParseResult ParseCrawl(ParserExtensionInfo *info, const vector<SimpleToken> &tokens);
 	static ParserExtensionPlanResult PlanCrawl(ParserExtensionInfo *info, ClientContext &context,
 	                                           unique_ptr<ParserExtensionParseData> parse_data);
 };

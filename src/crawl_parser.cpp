@@ -2,6 +2,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/merge_into_statement.hpp"
+#include "duckdb/parser/query_node/merge_query_node.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/comparison_expression.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
@@ -238,16 +239,17 @@ static string InjectMaxResultsIntoCrawlCalls(const string &query, int64_t limit)
 static void ExtractJoinColumns(ParsedExpression *expr, vector<string> &columns) {
 	if (!expr) return;
 
-	if (expr->type == ExpressionType::COLUMN_REF) {
+	if (expr->GetExpressionType() == ExpressionType::COLUMN_REF) {
 		auto &col_ref = expr->Cast<ColumnRefExpression>();
-		if (!col_ref.column_names.empty()) {
-			columns.push_back(col_ref.column_names.back());
+		auto &cnames = col_ref.ColumnNames();
+		if (!cnames.empty()) {
+			columns.push_back(cnames.back().GetIdentifierName());
 		}
-	} else if (expr->type == ExpressionType::COMPARE_EQUAL ||
-	           expr->type == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+	} else if (expr->GetExpressionType() == ExpressionType::COMPARE_EQUAL ||
+	           expr->GetExpressionType() == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
 		auto &comp = expr->Cast<ComparisonExpression>();
-		ExtractJoinColumns(comp.left.get(), columns);
-		ExtractJoinColumns(comp.right.get(), columns);
+		ExtractJoinColumns(comp.LeftMutable().get(), columns);
+		ExtractJoinColumns(comp.RightMutable().get(), columns);
 	}
 }
 
@@ -309,13 +311,19 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 
 	// Extract the parsed MergeIntoStatement
 	auto &merge_stmt = parser.statements[0]->Cast<MergeIntoStatement>();
+	if (!merge_stmt.node) {
+		return ParserExtensionParseResult("CRAWLING MERGE INTO syntax error: missing merge node");
+	}
+	auto &merge_node = *merge_stmt.node;
 
 	// Create our parse data with AST components
 	auto data = make_uniq<CrawlingMergeParseData>();
-	data->target = merge_stmt.target->Copy();
-	data->source = merge_stmt.source->Copy();
-	data->join_condition = merge_stmt.join_condition ? merge_stmt.join_condition->Copy() : nullptr;
-	data->using_columns = merge_stmt.using_columns;
+	data->target = merge_node.target->Copy();
+	data->source = merge_node.source->Copy();
+	data->join_condition = merge_node.join_condition ? merge_node.join_condition->Copy() : nullptr;
+	for (auto &col : merge_node.using_columns) {
+		data->using_columns.push_back(col.GetIdentifierName());
+	}
 	data->row_limit = row_limit;
 
 	// Extract join columns from condition for UPDATE BY NAME exclusion
@@ -324,19 +332,23 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 	}
 
 	// Convert MergeIntoActions to our CrawlingMergeActions
-	for (auto &entry : merge_stmt.actions) {
+	for (auto &entry : merge_node.actions) {
 		auto &action_list = data->actions[entry.first];
 		for (auto &action : entry.second) {
 			CrawlingMergeAction stream_action;
 			stream_action.action_type = action->action_type;
 			stream_action.condition = action->condition ? action->condition->Copy() : nullptr;
 			stream_action.column_order = action->column_order;
-			stream_action.insert_columns = action->insert_columns;
+			for (auto &col : action->insert_columns) {
+				stream_action.insert_columns.push_back(col.GetIdentifierName());
+			}
 			for (auto &expr : action->expressions) {
 				stream_action.insert_expressions.push_back(expr->Copy());
 			}
 			if (action->update_info) {
-				stream_action.set_columns = action->update_info->columns;
+				for (auto &col : action->update_info->columns) {
+					stream_action.set_columns.push_back(col.GetIdentifierName());
+				}
 				for (auto &expr : action->update_info->expressions) {
 					stream_action.set_expressions.push_back(expr->Copy());
 				}
@@ -351,11 +363,11 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 	if (data->source->type == TableReferenceType::SUBQUERY) {
 		auto &subquery_ref = data->source->Cast<SubqueryRef>();
 		data->source_query_sql = subquery_ref.subquery->ToString();
-		source_alias = subquery_ref.alias;
+		source_alias = subquery_ref.alias.GetIdentifierName();
 	} else {
 		// For table references, wrap in SELECT *
 		data->source_query_sql = "SELECT * FROM " + data->source->ToString();
-		source_alias = data->source->alias;
+		source_alias = data->source->alias.GetIdentifierName();
 	}
 
 	// Apply LIMIT pushdown to source query SQL if needed
@@ -379,18 +391,31 @@ CrawlParserExtension::CrawlParserExtension() {
 	plan_function = PlanCrawl;
 }
 
-ParserExtensionParseResult CrawlParserExtension::ParseCrawl(ParserExtensionInfo *info, const string &query) {
-	// Only handle CRAWLING MERGE INTO statements
-	// Table functions (crawl, crawl_url, htmlpath) are registered separately
+ParserExtensionParseResult CrawlParserExtension::ParseCrawl(ParserExtensionInfo *info,
+                                                            const vector<SimpleToken> &tokens) {
+	if (tokens.empty()) {
+		return ParserExtensionParseResult();
+	}
+	string query;
+	for (auto &tok : tokens) {
+		if (!query.empty()) {
+			query += " ";
+		}
+		query += tok.text;
+	}
 	string trimmed = Trim(query);
 	string lower = StringUtil::Lower(trimmed);
 
-	// Handle CRAWLING MERGE INTO (uses DuckDB's MERGE parser)
 	if (StringUtil::StartsWith(lower, "crawling merge into")) {
-		return ParseCrawlingMerge(trimmed);
+		auto result = ParseCrawlingMerge(trimmed);
+		if (result.type == ParserExtensionResultType::PARSE_SUCCESSFUL) {
+			result.consumed_tokens = static_cast<int64_t>(tokens.size());
+		} else {
+			result.consumed_tokens = -1;
+		}
+		return result;
 	}
 
-	// Not a statement we handle, let default parser handle it
 	return ParserExtensionParseResult();
 }
 
@@ -412,7 +437,7 @@ ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *i
 			throw BinderException("CRAWLING MERGE INTO: stream_merge_internal function not found");
 		}
 
-		result.function = table_function_catalog_entry.functions.functions[0];
+		result.function = *table_function_catalog_entry.functions.functions[0];
 
 		// Serialize AST components to strings for the executor
 		// Target table name (from AST)
@@ -500,7 +525,7 @@ ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *i
 		// Extract source alias from the source TableRef
 		string source_alias;
 		if (merge_data.source) {
-			source_alias = merge_data.source->alias;
+			source_alias = merge_data.source->alias.GetIdentifierName();
 		}
 
 		// Pass parameters to stream_merge_internal
