@@ -108,7 +108,7 @@ if(ENABLE_RUST_PARSER)
         # Windows: tree-sitter C uses assert()/fdopen; NDEBUG so release does not
         # import _wassert from the debug CRT.
         if(WIN32)
-            set(CARGO_BUILD_COMMAND ${CMAKE_COMMAND} -E env CFLAGS=-DNDEBUG ${CARGO_EXECUTABLE} build ${RUST_BUILD_FLAG} ${RUST_TARGET_FLAG})
+            set(CARGO_BUILD_COMMAND ${CMAKE_COMMAND} -E env "CFLAGS=-DNDEBUG -D_ACRTIMP=" ${CARGO_EXECUTABLE} build ${RUST_BUILD_FLAG} ${RUST_TARGET_FLAG})
         else()
             set(CARGO_BUILD_COMMAND ${CARGO_EXECUTABLE} build ${RUST_BUILD_FLAG} ${RUST_TARGET_FLAG})
         endif()
@@ -176,6 +176,9 @@ set(EXTENSION_SOURCES
 # Add Rust FFI wrapper if Rust parser is available
 if(RUST_PARSER_AVAILABLE)
     list(APPEND EXTENSION_SOURCES src/rust_ffi.cpp)
+    if(WIN32)
+        list(APPEND EXTENSION_SOURCES src/win_crt_stubs.c)
+    endif()
 endif()
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
