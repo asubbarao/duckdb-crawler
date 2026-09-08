@@ -105,12 +105,20 @@ if(ENABLE_RUST_PARSER)
         set(RUST_LIB_PATH ${RUST_PARSER_DIR}/target/${RUST_TARGET_DIR}${RUST_BUILD_TYPE}/${RUST_LIB_NAME})
 
         # Custom command to build Rust library
+        # Windows: tree-sitter C uses assert()/fdopen; NDEBUG so release does not
+        # import _wassert from the debug CRT.
+        if(WIN32)
+            set(CARGO_BUILD_COMMAND ${CMAKE_COMMAND} -E env CFLAGS=-DNDEBUG ${CARGO_EXECUTABLE} build ${RUST_BUILD_FLAG} ${RUST_TARGET_FLAG})
+        else()
+            set(CARGO_BUILD_COMMAND ${CARGO_EXECUTABLE} build ${RUST_BUILD_FLAG} ${RUST_TARGET_FLAG})
+        endif()
         add_custom_command(
             OUTPUT ${RUST_LIB_PATH}
-            COMMAND ${CARGO_EXECUTABLE} build ${RUST_BUILD_FLAG} ${RUST_TARGET_FLAG}
+            COMMAND ${CARGO_BUILD_COMMAND}
             WORKING_DIRECTORY ${RUST_PARSER_DIR}
             COMMENT "Building Rust HTML parser..."
             DEPENDS
+                ${CMAKE_CURRENT_LIST_FILE}
                 ${RUST_PARSER_DIR}/Cargo.toml
                 ${RUST_PARSER_DIR}/src/lib.rs
                 ${RUST_PARSER_DIR}/src/ffi.rs
@@ -191,8 +199,9 @@ if(RUST_PARSER_AVAILABLE)
         target_link_libraries(${EXTENSION_NAME} "-framework Security" "-framework CoreFoundation" "-framework SystemConfiguration")
         target_link_libraries(${LOADABLE_EXTENSION_NAME} "-framework Security" "-framework CoreFoundation" "-framework SystemConfiguration")
     elseif(WIN32)
-        target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
-        target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt ntdll)
+        # legacy_stdio_definitions: tree-sitter ts_parser_print_dot_graphs uses fdopen
+        target_link_libraries(${EXTENSION_NAME} ws2_32 userenv bcrypt ntdll legacy_stdio_definitions)
+        target_link_libraries(${LOADABLE_EXTENSION_NAME} ws2_32 userenv bcrypt ntdll legacy_stdio_definitions)
     elseif(UNIX)
         target_link_libraries(${EXTENSION_NAME} dl pthread m)
         target_link_libraries(${LOADABLE_EXTENSION_NAME} dl pthread m)
