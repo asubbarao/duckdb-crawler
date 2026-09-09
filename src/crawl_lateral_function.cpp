@@ -503,7 +503,7 @@ static SingleCrawlResult CrawlSingleUrl(const string &url,
 //===--------------------------------------------------------------------===//
 
 static unique_ptr<FunctionData> CrawlUrlBind(ClientContext &context, TableFunctionBindInput &input,
-                                              vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                              vector<LogicalType> &return_types, vector<string> &names) {
     auto bind_data = make_uniq<CrawlUrlBindData>();
 
     // Read extension settings as defaults

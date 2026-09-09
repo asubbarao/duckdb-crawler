@@ -105,7 +105,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// CRAWLING MERGE INTO — PEG treats the leading identifier as an
 	// ExpressionStatement and fails at MERGE. parse_function claims the tokens.
-	ParserExtension::Register(config, CrawlParserExtension());
+	config.parser_extensions.push_back(CrawlParserExtension());
 }
 
 void CrawlerExtension::Load(ExtensionLoader &loader) {

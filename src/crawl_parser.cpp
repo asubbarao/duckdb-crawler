@@ -2,7 +2,6 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/merge_into_statement.hpp"
-#include "duckdb/parser/query_node/merge_query_node.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
 #include "duckdb/parser/expression/comparison_expression.hpp"
 #include "duckdb/parser/tableref/subqueryref.hpp"
@@ -241,20 +240,20 @@ static void ExtractJoinColumns(ParsedExpression *expr, vector<string> &columns) 
 
 	if (expr->GetExpressionType() == ExpressionType::COLUMN_REF) {
 		auto &col_ref = expr->Cast<ColumnRefExpression>();
-		auto &cnames = col_ref.ColumnNames();
+		auto &cnames = col_ref.column_names;
 		if (!cnames.empty()) {
-			columns.push_back(cnames.back().GetIdentifierName());
+			columns.push_back(cnames.back());
 		}
 	} else if (expr->GetExpressionType() == ExpressionType::COMPARE_EQUAL ||
 	           expr->GetExpressionType() == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
 		auto &comp = expr->Cast<ComparisonExpression>();
-		ExtractJoinColumns(comp.LeftMutable().get(), columns);
-		ExtractJoinColumns(comp.RightMutable().get(), columns);
+		ExtractJoinColumns(comp.left.get(), columns);
+		ExtractJoinColumns(comp.right.get(), columns);
 	}
 }
 
 static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
-	string trimmed = Trim(query);
+	auto trimmed = Trim(query);
 	string lower = StringUtil::Lower(trimmed);
 
 	// Check for "CRAWLING MERGE INTO"
@@ -311,18 +310,14 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 
 	// Extract the parsed MergeIntoStatement
 	auto &merge_stmt = parser.statements[0]->Cast<MergeIntoStatement>();
-	if (!merge_stmt.node) {
-		return ParserExtensionParseResult("CRAWLING MERGE INTO syntax error: missing merge node");
-	}
-	auto &merge_node = *merge_stmt.node;
 
 	// Create our parse data with AST components
 	auto data = make_uniq<CrawlingMergeParseData>();
-	data->target = merge_node.target->Copy();
-	data->source = merge_node.source->Copy();
-	data->join_condition = merge_node.join_condition ? merge_node.join_condition->Copy() : nullptr;
-	for (auto &col : merge_node.using_columns) {
-		data->using_columns.push_back(col.GetIdentifierName());
+	data->target = merge_stmt.target->Copy();
+	data->source = merge_stmt.source->Copy();
+	data->join_condition = merge_stmt.join_condition ? merge_stmt.join_condition->Copy() : nullptr;
+	for (auto &col : merge_stmt.using_columns) {
+		data->using_columns.push_back(col);
 	}
 	data->row_limit = row_limit;
 
@@ -332,7 +327,7 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 	}
 
 	// Convert MergeIntoActions to our CrawlingMergeActions
-	for (auto &entry : merge_node.actions) {
+	for (auto &entry : merge_stmt.actions) {
 		auto &action_list = data->actions[entry.first];
 		for (auto &action : entry.second) {
 			CrawlingMergeAction stream_action;
@@ -340,14 +335,14 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 			stream_action.condition = action->condition ? action->condition->Copy() : nullptr;
 			stream_action.column_order = action->column_order;
 			for (auto &col : action->insert_columns) {
-				stream_action.insert_columns.push_back(col.GetIdentifierName());
+				stream_action.insert_columns.push_back(col);
 			}
 			for (auto &expr : action->expressions) {
 				stream_action.insert_expressions.push_back(expr->Copy());
 			}
 			if (action->update_info) {
 				for (auto &col : action->update_info->columns) {
-					stream_action.set_columns.push_back(col.GetIdentifierName());
+					stream_action.set_columns.push_back(col);
 				}
 				for (auto &expr : action->update_info->expressions) {
 					stream_action.set_expressions.push_back(expr->Copy());
@@ -363,11 +358,11 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 	if (data->source->type == TableReferenceType::SUBQUERY) {
 		auto &subquery_ref = data->source->Cast<SubqueryRef>();
 		data->source_query_sql = subquery_ref.subquery->ToString();
-		source_alias = subquery_ref.alias.GetIdentifierName();
+		source_alias = subquery_ref.alias;
 	} else {
 		// For table references, wrap in SELECT *
 		data->source_query_sql = "SELECT * FROM " + data->source->ToString();
-		source_alias = data->source->alias.GetIdentifierName();
+		source_alias = data->source->alias;
 	}
 
 	// Apply LIMIT pushdown to source query SQL if needed
@@ -391,39 +386,17 @@ CrawlParserExtension::CrawlParserExtension() {
 	plan_function = PlanCrawl;
 }
 
-ParserExtensionParseResult CrawlParserExtension::ParseCrawl(ParserExtensionInfo *info,
-                                                            const vector<SimpleToken> &tokens) {
-	if (tokens.size() < 3) {
+ParserExtensionParseResult CrawlParserExtension::ParseCrawl(ParserExtensionInfo *info, const string &query) {
+	(void)info;
+	auto trimmed = Trim(query);
+	if (trimmed.empty()) {
 		return ParserExtensionParseResult();
 	}
-	if (!StringUtil::CIEquals(tokens[0].text, "crawling") || !StringUtil::CIEquals(tokens[1].text, "merge") ||
-	    !StringUtil::CIEquals(tokens[2].text, "into")) {
+	auto lower = StringUtil::Lower(trimmed);
+	if (!StringUtil::StartsWith(lower, "crawling merge into")) {
 		return ParserExtensionParseResult();
 	}
-
-	string query;
-	idx_t consumed = 0;
-	for (auto &tok : tokens) {
-		consumed++;
-		if (tok.type == TokenType::END_OF_INPUT || tok.type == TokenType::END_OF_INPUT_AUTOCOMPLETE) {
-			break;
-		}
-		if (tok.type == TokenType::TERMINATOR) {
-			break;
-		}
-		if (!query.empty()) {
-			query += " ";
-		}
-		query += tok.text;
-	}
-
-	auto result = ParseCrawlingMerge(query);
-	if (result.type == ParserExtensionResultType::PARSE_SUCCESSFUL) {
-		result.consumed_tokens = static_cast<int64_t>(consumed);
-	} else {
-		result.consumed_tokens = -1;
-	}
-	return result;
+	return ParseCrawlingMerge(trimmed);
 }
 
 ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *info, ClientContext &context,
@@ -444,7 +417,7 @@ ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *i
 			throw BinderException("CRAWLING MERGE INTO: stream_merge_internal function not found");
 		}
 
-		result.function = *table_function_catalog_entry.functions.functions[0];
+		result.function = table_function_catalog_entry.functions.functions[0];
 
 		// Serialize AST components to strings for the executor
 		// Target table name (from AST)
@@ -532,7 +505,7 @@ ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *i
 		// Extract source alias from the source TableRef
 		string source_alias;
 		if (merge_data.source) {
-			source_alias = merge_data.source->alias.GetIdentifierName();
+			source_alias = merge_data.source->alias;
 		}
 
 		// Pass parameters to stream_merge_internal

@@ -4,8 +4,8 @@
 #include "duckdb/parser/parser_extension.hpp"
 #include "duckdb/parser/tableref.hpp"
 #include "duckdb/parser/parsed_expression.hpp"
-#include "duckdb/common/enums/merge_action_type.hpp"
 #include "duckdb/parser/statement/insert_statement.hpp"
+#include "duckdb/common/enums/merge_action_type.hpp"
 
 namespace duckdb {
 
@@ -64,7 +64,7 @@ class CrawlParserExtension : public ParserExtension {
 public:
 	CrawlParserExtension();
 
-	static ParserExtensionParseResult ParseCrawl(ParserExtensionInfo *info, const vector<SimpleToken> &tokens);
+	static ParserExtensionParseResult ParseCrawl(ParserExtensionInfo *info, const string &query);
 	static ParserExtensionPlanResult PlanCrawl(ParserExtensionInfo *info, ClientContext &context,
 	                                           unique_ptr<ParserExtensionParseData> parse_data);
 };

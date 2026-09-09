@@ -501,7 +501,7 @@ static void InferColumnTypes(ReadHtmlBindData &bind_data) {
 static unique_ptr<FunctionData> ReadHtmlBind(ClientContext &context,
                                                 TableFunctionBindInput &input,
                                                 vector<LogicalType> &return_types,
-                                                vector<Identifier> &names) {
+                                                vector<string> &names) {
     auto bind_data = make_uniq<ReadHtmlBindData>();
 
     // First argument: URL
@@ -561,7 +561,7 @@ static unique_ptr<FunctionData> ReadHtmlBind(ClientContext &context,
     for (idx_t i = 0; i < bind_data->headers.size(); i++) {
         string col_name = SanitizeHeaderName(bind_data->headers[i], names.size() + 1);
         col_name = MakeUniqueColumnName(col_name, used_names);
-        names.push_back(Identifier(col_name));
+        names.push_back(col_name);
 
         // Use inferred type
         switch (bind_data->column_types[i]) {

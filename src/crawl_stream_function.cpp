@@ -301,7 +301,7 @@ static void StreamCrawlWorker(
 
 // Bind function
 static unique_ptr<FunctionData> CrawlStreamBind(ClientContext &context, TableFunctionBindInput &input,
-                                                 vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                                 vector<LogicalType> &return_types, vector<string> &names) {
     auto bind_data = make_uniq<CrawlStreamBindData>();
 
     // Read extension settings as defaults
@@ -362,7 +362,7 @@ static unique_ptr<FunctionData> CrawlStreamBind(ClientContext &context, TableFun
 
 // Bind function for query-based crawl (accepts a SQL query string)
 static unique_ptr<FunctionData> CrawlStreamBindQuery(ClientContext &context, TableFunctionBindInput &input,
-                                                      vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                                      vector<LogicalType> &return_types, vector<string> &names) {
     auto bind_data = make_uniq<CrawlStreamBindData>();
 
     // Read extension settings as defaults

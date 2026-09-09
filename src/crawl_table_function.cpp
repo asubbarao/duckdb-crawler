@@ -625,7 +625,7 @@ static void SaveToCache(Connection &conn, const CrawlResultEntry &entry) {
 //===--------------------------------------------------------------------===//
 
 static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                           vector<LogicalType> &return_types, vector<string> &names) {
     auto bind_data = make_uniq<CrawlBindData>();
 
     // Read extension settings as defaults

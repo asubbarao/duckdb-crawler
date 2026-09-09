@@ -44,7 +44,7 @@ struct StreamIntoGlobalState : public GlobalTableFunctionState {
 //===--------------------------------------------------------------------===//
 
 static unique_ptr<FunctionData> StreamIntoBind(ClientContext &context, TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types, vector<Identifier> &names) {
+                                                vector<LogicalType> &return_types, vector<string> &names) {
     auto bind_data = make_uniq<StreamIntoBindData>();
 
     // Parameters from parser: source_query, target_table, batch_size, row_limit
