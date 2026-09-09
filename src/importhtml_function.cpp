@@ -46,6 +46,7 @@ struct ReadHtmlBindData : public TableFunctionData {
 // First occurrence keeps the base name; later collisions become base_1, base_2, ...
 static string SanitizeHeaderName(const string &header, idx_t fallback_idx) {
     string col_name = header;
+    StringUtil::Trim(col_name);
     if (col_name.empty()) {
         col_name = "column" + std::to_string(fallback_idx);
     }
@@ -58,12 +59,13 @@ static string SanitizeHeaderName(const string &header, idx_t fallback_idx) {
 }
 
 static string MakeUniqueColumnName(const string &base, unordered_set<string> &used) {
-    if (used.insert(base).second) {
+    auto canonical = StringUtil::Lower(base);
+    if (used.insert(canonical).second) {
         return base;
     }
     for (idx_t i = 1;; i++) {
         string candidate = base + "_" + std::to_string(i);
-        if (used.insert(candidate).second) {
+        if (used.insert(StringUtil::Lower(candidate)).second) {
             return candidate;
         }
     }
