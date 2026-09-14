@@ -947,6 +947,11 @@ static void CrawlFunction(ClientContext &context, TableFunctionInput &data, Data
                 if (bind_data.use_cache) {
                     SaveToCache(cache_conn, result);
                 }
+            } else {
+                // Rust returns no entry for URLs filtered out by robots.txt
+                result.url = url_to_fetch;
+                result.depth = url_depth;
+                result.error = "Blocked by robots.txt";
             }
         }
 

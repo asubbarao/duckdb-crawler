@@ -25,7 +25,6 @@ src/
 ├── thread_utils.cpp       # ThreadSafeQueue, ThreadSafeDomainMap
 ├── sitemap_discovery.cpp  # Sitemap fetching/caching
 ├── utils.cpp              # DecompressGzip, GenerateSurtKey, helpers
-├── http_client.cpp        # HTTP via libcurl
 ├── robots_parser.cpp      # robots.txt parsing
 ├── sitemap_parser.cpp     # XML sitemap parsing
 ├── link_parser.cpp        # HTML link extraction
@@ -65,9 +64,9 @@ Edit `vcpkg.json`:
     "dependencies": [
         "zlib",
         {
-            "name": "curl",
+            "name": "libxml2",
             "default-features": false,
-            "features": ["ssl", "openssl", "http2"]
+            "features": ["iconv"]
         },
         "new-package-name"
     ]
@@ -252,7 +251,6 @@ if (response.body.size() > max_response_bytes) {
 | `src/thread_utils.cpp` | ThreadSafeQueue, ThreadSafeDomainMap (TODO: extract) |
 | `src/sitemap_discovery.cpp` | Sitemap fetching/caching (TODO: extract) |
 | `src/utils.cpp` | Helpers: DecompressGzip, GenerateSurtKey (TODO: extract) |
-| `src/http_client.cpp` | HTTP requests via libcurl |
 | `src/robots_parser.cpp` | robots.txt parsing |
 | `src/sitemap_parser.cpp` | Sitemap XML parsing |
 | `src/link_parser.cpp` | HTML link extraction |

@@ -8,6 +8,8 @@
     pkgs.cmake
     pkgs.rustc
     pkgs.cargo
+    pkgs.libxml2.dev
+    pkgs.zlib.dev
   ];
 
   languages.cplusplus.enable = true;

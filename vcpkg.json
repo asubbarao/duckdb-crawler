@@ -2,11 +2,6 @@
     "dependencies": [
         "zlib",
         {
-            "name": "curl",
-            "default-features": false,
-            "features": ["ssl", "openssl", "http2"]
-        },
-        {
             "name": "libxml2",
             "default-features": false,
             "features": ["iconv"]

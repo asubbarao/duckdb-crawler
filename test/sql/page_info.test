@@ -4,6 +4,8 @@
 
 require crawler
 
+require json
+
 # Test page_info() returns JSON with expected keys
 query I
 SELECT json_array_length(json_keys(page_info(
