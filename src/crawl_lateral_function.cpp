@@ -368,6 +368,12 @@ struct CrawlUrlLocalState : public LocalTableFunctionState {
 //===--------------------------------------------------------------------===//
 
 struct CrawlUrlGlobalState : public GlobalTableFunctionState {
+    // True when invoked bare (FROM crawl_url('url')): DuckDB drives the in-out
+    // function as a table-scan source, re-delivering the same constant input
+    // chunk until we emit 0 rows. Without tracking this we'd re-crawl forever.
+    bool source_mode = false;
+    bool source_done = false;
+
     idx_t MaxThreads() const override { return 1; }
 };
 
@@ -559,7 +565,10 @@ static unique_ptr<FunctionData> CrawlUrlBind(ClientContext &context, TableFuncti
 
 static unique_ptr<GlobalTableFunctionState> CrawlUrlInitGlobal(ClientContext &context,
                                                                  TableFunctionInitInput &input) {
-    return make_uniq<CrawlUrlGlobalState>();
+    auto state = make_uniq<CrawlUrlGlobalState>();
+    // PhysicalTableScan (bare call) passes its operator; PhysicalTableInOutFunction (LATERAL) does not
+    state->source_mode = bool(input.op);
+    return std::move(state);
 }
 
 static unique_ptr<LocalTableFunctionState> CrawlUrlInitLocal(ExecutionContext &context,
@@ -576,6 +585,17 @@ static OperatorResultType CrawlUrlInOut(ExecutionContext &context, TableFunction
                                          DataChunk &input, DataChunk &output) {
     auto &bind_data = data.bind_data->CastNoConst<CrawlUrlBindData>();
     auto &local_state = data.local_state->Cast<CrawlUrlLocalState>();
+    auto &global_state = data.global_state->Cast<CrawlUrlGlobalState>();
+
+    // Bare call (source mode): the same constant input chunk is re-delivered
+    // until we emit 0 rows, so process it exactly once
+    if (global_state.source_mode) {
+        if (global_state.source_done) {
+            output.SetCardinality(0);
+            return OperatorResultType::FINISHED;
+        }
+        global_state.source_done = true;
+    }
 
     // Initialize chunk tracking on new input
     if (!local_state.chunk_initialized) {
