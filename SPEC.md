@@ -6,11 +6,8 @@ SQL-native web crawler with streaming pipelines. Fetch, parse, and query HTML as
 
 ```sql
 -- Dream syntax: multi-stage pipeline, no blocking, stops at LIMIT
-SELECT job->>'title', job->>'salary'
-FROM crawl(
-    crawl(['https://example.com/jobs'], extract = ['ids := $("a.job")::json[*].id']),
-    extract = ['job := jsonld.JobPosting']
-)
+SELECT html.schema['JobPosting']->>'title', html.schema['JobPosting']->>'baseSalary'
+FROM crawl(crawl(['https://example.com/jobs']))
 LIMIT 10;
 ```
 
@@ -54,19 +51,19 @@ Crawl results are tables. Extractions are columns. Composition via CTEs/subqueri
 -- Crawl is a table function
 SELECT * FROM crawl(urls, options);
 
--- Extraction specs become columns
+-- Extraction functions become columns
 SELECT
-    extract->>'title' as title,
-    extract->>'price' as price
-FROM crawl(..., extract = ['title := $("h1")', 'price := $(".price")']);
+    htmlpath(html.document, 'h1@text') as title,
+    htmlpath(html.document, '.price@text') as price
+FROM crawl(...);
 
 -- Composable with standard SQL
 WITH listings AS (
     SELECT * FROM crawl(sitemap('https://shop.com/sitemap.xml'))
     WHERE url LIKE '%/product/%'
 )
-SELECT * FROM crawl(listings, extract = [...])
-WHERE extract->>'in_stock' = 'true';
+SELECT * FROM crawl(listings)
+WHERE htmlpath(html.document, '.stock@text')::VARCHAR = 'In stock';
 ```
 
 ### 3. HTML as Queryable AST
@@ -215,9 +212,9 @@ User Query                    Extension                      Network
 
 SELECT ...                   ┌─────────────┐
 FROM crawl(                  │ Parse query │
-  [...urls...],       ───▶   │ Build plan  │
-  extract = [...]            └──────┬──────┘
-)                                   │
+  [...urls...]        ───▶   │ Build plan  │
+)                            └──────┬──────┘
+                                    │
 LIMIT 10;                           ▼
                              ┌─────────────┐
                              │ URL Queue   │◀──── Sitemap/Links
@@ -268,9 +265,6 @@ LIMIT 10;                           ▼
 crawl(
     source,                    -- URLs: list, query string, or table function
 
-    -- Extraction
-    extract = [...],           -- Extraction specs (see below)
-
     -- HTTP options
     user_agent = 'Bot/1.0',    -- User agent string
     timeout = 30,              -- Request timeout (seconds)
@@ -300,33 +294,9 @@ crawl(
 | status | INTEGER | HTTP status code |
 | content_type | VARCHAR | Response content type |
 | body | VARCHAR | Response body |
-| extract | JSON | Extracted fields |
 | response_time_ms | BIGINT | Request duration |
 | error | VARCHAR | Error message if failed |
 | depth | INTEGER | Crawl depth (if following links) |
-
-### Extraction Spec Syntax
-
-```sql
--- CSS selector (default: text content)
-'name := $("selector")'
-'name := $("selector", "text")'      -- Explicit text
-'name := $("selector", "html")'      -- Inner HTML
-'name := $("selector", "attr:href")' -- Attribute
-
--- With type casting
-'name := $("selector")::json'        -- Parse as JSON
-'name := $("selector")::json[*]'     -- Expand array to rows
-
--- Structured data paths
-'name := jsonld.Product.name'        -- JSON-LD by @type
-'name := og.title'                   -- OpenGraph
-'name := meta.description'           -- Meta tags
-'name := js.window.data'             -- JS variable (static analysis)
-
--- Coalesce (first non-null)
-'name := COALESCE(jsonld.Product.name, og.title, $("h1"))'
-```
 
 ### sitemap() Table Function
 
@@ -428,7 +398,6 @@ SELECT * FROM crawl(urls, state_table = 'my_crawl');
 CREATE TABLE my_crawl (
     url VARCHAR PRIMARY KEY,
     http_status INTEGER,
-    extracted JSON,
     crawled_at TIMESTAMP DEFAULT current_timestamp,
     etag VARCHAR,
     last_modified VARCHAR
@@ -462,8 +431,7 @@ SELECT * FROM crawl(
 ## Implementation Status
 
 ### Phase 1: Core Streaming ✅
-- [x] `crawl()` table function with extraction
-- [x] Extraction spec parsing in C++
+- [x] `crawl()` table function
 - [x] Rust FFI for HTML parsing
 - [x] State table for checkpointing
 - [x] Basic streaming (yields rows)
@@ -520,18 +488,10 @@ WITH product_urls AS (
 products AS (
     SELECT
         url,
-        extract->>'name' as name,
-        (extract->>'price')::decimal as price,
-        extract->>'sku' as sku
-    FROM crawl(
-        product_urls,
-        extract = [
-            'name := jsonld.Product.name',
-            'price := jsonld.Product.offers.price',
-            'sku := jsonld.Product.sku'
-        ],
-        state_table = 'product_cache'
-    )
+        html.schema['Product']->>'name' as name,
+        (html.schema['Product']->'offers'->>'price')::decimal as price,
+        html.schema['Product']->>'sku' as sku
+    FROM crawl(product_urls, state_table = 'product_cache')
 )
 SELECT * FROM products WHERE price < 100;
 ```
@@ -543,28 +503,17 @@ SELECT * FROM products WHERE price < 100;
 WITH job_ids AS (
     SELECT
         url,
-        UNNEST(from_json(extract->>'ids', '["varchar"]')) as job_id
-    FROM crawl(
-        ['https://jobs.example.com/listings'],
-        extract = ['ids := $("script#jobs-data")::json[*].id']
-    )
+        UNNEST(from_json(htmlpath(html.document, 'script#jobs-data@text')::json->'$[*].id', '["varchar"]')) as job_id
+    FROM crawl(['https://jobs.example.com/listings'])
 ),
 -- Stage 2: Fetch individual job details (streams!)
 job_details AS (
     SELECT
-        extract->>'title' as title,
-        extract->>'company' as company,
-        extract->>'salary' as salary,
-        extract->>'location' as location
-    FROM crawl(
-        'SELECT url || ''/job/'' || job_id FROM job_ids',
-        extract = [
-            'title := jsonld.JobPosting.title',
-            'company := jsonld.JobPosting.hiringOrganization.name',
-            'salary := jsonld.JobPosting.baseSalary',
-            'location := jsonld.JobPosting.jobLocation.address'
-        ]
-    )
+        html.schema['JobPosting']->>'title' as title,
+        html.schema['JobPosting']->'hiringOrganization'->>'name' as company,
+        html.schema['JobPosting']->>'baseSalary' as salary,
+        html.schema['JobPosting']->'jobLocation'->>'address' as location
+    FROM crawl('SELECT url || ''/job/'' || job_id FROM job_ids')
 )
 SELECT * FROM job_details LIMIT 100;  -- Stops after 100, doesn't crawl all!
 ```
@@ -575,37 +524,30 @@ SELECT * FROM job_details LIMIT 100;  -- Stops after 100, doesn't crawl all!
 -- Continuously check news sites (with caching)
 SELECT
     url,
-    extract->>'headline' as headline,
-    extract->>'published' as published
+    html.schema['NewsArticle']->>'headline' as headline,
+    html.schema['NewsArticle']->>'datePublished' as published
 FROM crawl(
     sitemap('https://news.example.com/sitemap-news.xml'),
-    extract = [
-        'headline := jsonld.NewsArticle.headline',
-        'published := jsonld.NewsArticle.datePublished'
-    ],
     state_table = 'news_cache',
     conditional = true  -- Only re-fetch if changed
 )
-WHERE (extract->>'published')::timestamp > now() - interval '1 day';
+WHERE (html.schema['NewsArticle']->>'datePublished')::timestamp > now() - interval '1 day';
 ```
 
 ### Multi-Site Aggregation
 
 ```sql
--- Crawl multiple sites with different extraction patterns
+-- Crawl multiple sites with different extraction selectors
 WITH sites AS (
     SELECT * FROM (VALUES
-        ('https://site1.com/products', 'price := $(".price")', 'name := $("h1")'),
-        ('https://site2.com/items', 'price := jsonld.Product.price', 'name := jsonld.Product.name')
-    ) AS t(url, price_spec, name_spec)
+        ('https://site1.com/products', '.price@text', 'h1@text'),
+        ('https://site2.com/items', '.amount@text', '.title@text')
+    ) AS t(url, price_selector, name_selector)
 )
 SELECT
     s.url as source,
-    c.extract->>'name' as name,
-    c.extract->>'price' as price
+    htmlpath(c.html.document, s.name_selector) as name,
+    htmlpath(c.html.document, s.price_selector) as price
 FROM sites s,
-LATERAL crawl(
-    [s.url],
-    extract = [s.price_spec, s.name_spec]
-) c;
+LATERAL crawl_url(s.url) c;
 ```

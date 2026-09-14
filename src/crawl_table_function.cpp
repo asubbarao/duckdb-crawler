@@ -4,7 +4,6 @@
 //   SELECT url, html.body, html.opengraph->>'title', html.schema->'Product'->>'name'
 //   FROM crawl(
 //       'SELECT url FROM my_urls',
-//       extract = ['title := $("title")', 'price := $(".price")'],
 //       state_table = 'crawl_state',
 //       user_agent = 'Bot/1.0'
 //   )
@@ -40,7 +39,6 @@ using namespace duckdb_yyjson;
 
 // Build batch crawl request JSON for Rust
 static string BuildBatchCrawlRequest(const vector<string> &urls,
-                                      const string &extraction_json,
                                       const string &user_agent,
                                       int timeout_ms,
                                       int concurrency,
@@ -62,17 +60,6 @@ static string BuildBatchCrawlRequest(const vector<string> &urls,
         yyjson_mut_arr_add_strcpy(doc, urls_arr, url.c_str());
     }
     yyjson_mut_obj_add_val(doc, root, "urls", urls_arr);
-
-    // Extraction specs (if any)
-    if (!extraction_json.empty() && extraction_json != "{}") {
-        yyjson_doc *ext_doc = yyjson_read(extraction_json.c_str(), extraction_json.size(), 0);
-        if (ext_doc) {
-            yyjson_val *ext_root = yyjson_doc_get_root(ext_doc);
-            yyjson_mut_val *ext_copy = yyjson_val_mut_copy(doc, ext_root);
-            yyjson_mut_obj_add_val(doc, root, "extraction", ext_copy);
-            yyjson_doc_free(ext_doc);
-        }
-    }
 
     // Options
     yyjson_mut_obj_add_strcpy(doc, root, "user_agent", user_agent.c_str());
@@ -179,7 +166,6 @@ struct CrawlResultEntry {
     string content_type;
     string body;
     string error;
-    string extracted_json;
     int64_t response_time_ms = 0;
     int depth = 1;  // Crawl depth (1 = initial URL)
 };
@@ -245,17 +231,6 @@ static vector<CrawlResultEntry> ParseBatchCrawlResponse(const string &response_j
         yyjson_val *time_val = yyjson_obj_get(item, "response_time_ms");
         if (time_val && yyjson_is_uint(time_val)) {
             entry.response_time_ms = (int64_t)yyjson_get_uint(time_val);
-        }
-
-        // Extracted data
-        yyjson_val *extracted = yyjson_obj_get(item, "extracted");
-        if (extracted && !yyjson_is_null(extracted)) {
-            size_t len = 0;
-            char *json_str = yyjson_val_write(extracted, 0, &len);
-            if (json_str) {
-                entry.extracted_json = string(json_str, len);
-                free(json_str);
-            }
         }
 
         results.push_back(std::move(entry));
@@ -504,7 +479,6 @@ static void EnsureStateTable(Connection &conn, const string &table_name) {
     string sql = "CREATE TABLE IF NOT EXISTS " + QuoteSqlIdentifier(table_name) + " ("
                  "url VARCHAR PRIMARY KEY, "
                  "http_status INTEGER, "
-                 "extracted JSON, "
                  "crawled_at TIMESTAMP DEFAULT current_timestamp, "
                  "etag VARCHAR, "
                  "last_modified VARCHAR)";
@@ -529,9 +503,8 @@ static std::set<string> LoadProcessedUrls(Connection &conn, const string &table_
 
 static void SaveToStateTable(Connection &conn, const string &table_name, const CrawlResultEntry &entry) {
     string sql = "INSERT OR REPLACE INTO " + QuoteSqlIdentifier(table_name) +
-                 " (url, http_status, extracted, crawled_at) VALUES ($1, $2, $3, current_timestamp)";
-    Value extracted_val = entry.extracted_json.empty() ? Value() : Value(entry.extracted_json);
-    conn.Query(sql, entry.url, entry.status_code, extracted_val);
+                 " (url, http_status, crawled_at) VALUES ($1, $2, current_timestamp)";
+    conn.Query(sql, entry.url, entry.status_code);
 }
 
 //===--------------------------------------------------------------------===//
@@ -717,7 +690,6 @@ static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionB
 
     return_types.push_back(LogicalType::VARCHAR);  // final_url
     return_types.push_back(LogicalType::VARCHAR);  // error
-    return_types.push_back(LogicalType::VARCHAR);  // extract
     return_types.push_back(LogicalType::BIGINT);   // response_time_ms
     return_types.push_back(LogicalType::INTEGER);  // depth
 
@@ -727,7 +699,6 @@ static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionB
     names.push_back("html");
     names.push_back("final_url");
     names.push_back("error");
-    names.push_back("extract");
     names.push_back("response_time_ms");
     names.push_back("depth");
 
@@ -848,9 +819,8 @@ static void CrawlFunction(ClientContext &context, TableFunctionInput &data, Data
             output.SetValue(3, count, BuildHtmlStructValue(entry.body, entry.content_type, entry.url));
             output.SetValue(4, count, entry.final_url.empty() ? Value() : Value(entry.final_url));
             output.SetValue(5, count, entry.error.empty() ? Value() : Value(entry.error));
-            output.SetValue(6, count, entry.extracted_json.empty() ? Value() : Value(entry.extracted_json));
-            output.SetValue(7, count, Value::BIGINT(entry.response_time_ms));
-            output.SetValue(8, count, Value::INTEGER(entry.depth));
+            output.SetValue(6, count, Value::BIGINT(entry.response_time_ms));
+            output.SetValue(7, count, Value::INTEGER(entry.depth));
             count++;
             state.results_returned++;  // Track for max_results limit
 
@@ -925,7 +895,6 @@ static void CrawlFunction(ClientContext &context, TableFunctionInput &data, Data
 
             string request_json = BuildBatchCrawlRequest(
                 {url_to_fetch},
-                "{}",  // No extraction specs
                 bind_data.user_agent,
                 bind_data.timeout_ms,
                 1,  // Single URL, single concurrency
@@ -1070,7 +1039,6 @@ static OperatorResultType CrawlInOut(ExecutionContext &context, TableFunctionInp
             yyjson_val *content_type_val = yyjson_obj_get(item, "content_type");
             yyjson_val *body_val = yyjson_obj_get(item, "body");
             yyjson_val *error_val = yyjson_obj_get(item, "error");
-            yyjson_val *extracted_val = yyjson_obj_get(item, "extracted");
             yyjson_val *time_val = yyjson_obj_get(item, "response_time_ms");
 
             string result_url = url_val_json ? yyjson_get_str(url_val_json) : url;
@@ -1081,24 +1049,14 @@ static OperatorResultType CrawlInOut(ExecutionContext &context, TableFunctionInp
             string error = error_val ? yyjson_get_str(error_val) : "";
             int64_t response_time = time_val ? yyjson_get_int(time_val) : 0;
 
-            string extracted_json;
-            if (extracted_val) {
-                char *ext_str = yyjson_val_write(extracted_val, 0, nullptr);
-                if (ext_str) {
-                    extracted_json = ext_str;
-                    free(ext_str);
-                }
-            }
-
             output.SetValue(0, count, Value(result_url));
             output.SetValue(1, count, Value(status));
             output.SetValue(2, count, Value(content_type));
             output.SetValue(3, count, BuildHtmlStructValue(body, content_type, result_url));
             output.SetValue(4, count, final_url.empty() ? Value() : Value(final_url));
             output.SetValue(5, count, error.empty() ? Value() : Value(error));
-            output.SetValue(6, count, extracted_json.empty() ? Value() : Value(extracted_json));
-            output.SetValue(7, count, Value::BIGINT(response_time));
-            output.SetValue(8, count, Value());
+            output.SetValue(6, count, Value::BIGINT(response_time));
+            output.SetValue(7, count, Value());
         } else {
             output.SetValue(0, count, Value(url));
             output.SetValue(1, count, Value());
@@ -1108,7 +1066,6 @@ static OperatorResultType CrawlInOut(ExecutionContext &context, TableFunctionInp
             output.SetValue(5, count, Value("No results"));
             output.SetValue(6, count, Value());
             output.SetValue(7, count, Value());
-            output.SetValue(8, count, Value());
         }
 
         yyjson_doc_free(resp_doc);
@@ -1126,7 +1083,6 @@ static OperatorResultType CrawlInOut(ExecutionContext &context, TableFunctionInp
 void RegisterCrawlTableFunction(ExtensionLoader &loader) {
     // Named parameters helper
     auto add_params = [](TableFunction &func) {
-        func.named_parameters["extract"] = LogicalType::LIST(LogicalType::VARCHAR);
         func.named_parameters["state_table"] = LogicalType::VARCHAR;
         func.named_parameters["user_agent"] = LogicalType::VARCHAR;
         func.named_parameters["timeout"] = LogicalType::INTEGER;

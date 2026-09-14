@@ -88,7 +88,6 @@ struct SingleCrawlResult {
     string content_type;
     string body;
     string error;
-    string extracted_json;
     int64_t response_time_ms = 0;
 };
 
@@ -377,7 +376,6 @@ struct CrawlUrlGlobalState : public GlobalTableFunctionState {
 //===--------------------------------------------------------------------===//
 
 static SingleCrawlResult CrawlSingleUrl(const string &url,
-                                         const string &extraction_json,
                                          const string &user_agent,
                                          int timeout_ms) {
     SingleCrawlResult result;
@@ -397,17 +395,6 @@ static SingleCrawlResult CrawlSingleUrl(const string &url,
     yyjson_mut_val *urls_arr = yyjson_mut_arr(doc);
     yyjson_mut_arr_add_strcpy(doc, urls_arr, url.c_str());
     yyjson_mut_obj_add_val(doc, root, "urls", urls_arr);
-
-    // Extraction specs
-    if (!extraction_json.empty() && extraction_json != "{}") {
-        yyjson_doc *ext_doc = yyjson_read(extraction_json.c_str(), extraction_json.size(), 0);
-        if (ext_doc) {
-            yyjson_val *ext_root = yyjson_doc_get_root(ext_doc);
-            yyjson_mut_val *ext_copy = yyjson_val_mut_copy(doc, ext_root);
-            yyjson_mut_obj_add_val(doc, root, "extraction", ext_copy);
-            yyjson_doc_free(ext_doc);
-        }
-    }
 
     // Options
     yyjson_mut_obj_add_strcpy(doc, root, "user_agent", user_agent.c_str());
@@ -482,15 +469,6 @@ static SingleCrawlResult CrawlSingleUrl(const string &url,
             result.response_time_ms = (int64_t)yyjson_get_uint(time_val);
         }
 
-        yyjson_val *extracted = yyjson_obj_get(item, "extracted");
-        if (extracted && !yyjson_is_null(extracted)) {
-            size_t ext_len = 0;
-            char *ext_str = yyjson_val_write(extracted, 0, &ext_len);
-            if (ext_str) {
-                result.extracted_json = string(ext_str, ext_len);
-                free(ext_str);
-            }
-        }
     }
 
     yyjson_doc_free(resp_doc);
@@ -553,7 +531,6 @@ static unique_ptr<FunctionData> CrawlUrlBind(ClientContext &context, TableFuncti
 
     return_types.push_back(LogicalType::VARCHAR);  // final_url
     return_types.push_back(LogicalType::VARCHAR);  // error
-    return_types.push_back(LogicalType::VARCHAR);  // extract
     return_types.push_back(LogicalType::BIGINT);   // response_time_ms
 
     names.push_back("url");
@@ -562,7 +539,6 @@ static unique_ptr<FunctionData> CrawlUrlBind(ClientContext &context, TableFuncti
     names.push_back("html");
     names.push_back("final_url");
     names.push_back("error");
-    names.push_back("extract");
     names.push_back("response_time_ms");
 
     // Look up shared pipeline state for LIMIT pushdown across LATERAL calls
@@ -689,8 +665,7 @@ static OperatorResultType CrawlUrlInOut(ExecutionContext &context, TableFunction
 
         // Crawl if not in cache
         if (!from_cache) {
-            result = CrawlSingleUrl(url, "{}",  // No extraction specs
-                                    bind_data.user_agent, bind_data.timeout_ms);
+            result = CrawlSingleUrl(url, bind_data.user_agent, bind_data.timeout_ms);
 
             // Save to cache
             if (bind_data.use_cache) {
@@ -706,8 +681,7 @@ static OperatorResultType CrawlUrlInOut(ExecutionContext &context, TableFunction
         output.SetValue(3, 0, BuildHtmlStructValue(result.body, result.content_type, result.url));
         output.SetValue(4, 0, result.final_url.empty() ? Value() : Value(result.final_url));
         output.SetValue(5, 0, result.error.empty() ? Value() : Value(result.error));
-        output.SetValue(6, 0, result.extracted_json.empty() ? Value() : Value(result.extracted_json));
-        output.SetValue(7, 0, Value::BIGINT(result.response_time_ms));
+        output.SetValue(6, 0, Value::BIGINT(result.response_time_ms));
         output.SetCardinality(1);
 
         local_state.current_row++;
@@ -747,7 +721,6 @@ void RegisterCrawlUrlFunction(ExtensionLoader &loader) {
     func.in_out_function = CrawlUrlInOut;
 
     // Named parameters
-    func.named_parameters["extract"] = LogicalType::LIST(LogicalType::VARCHAR);
     func.named_parameters["user_agent"] = LogicalType::VARCHAR;
     func.named_parameters["timeout"] = LogicalType::INTEGER;
     func.named_parameters["cache"] = LogicalType::BOOLEAN;
@@ -761,7 +734,6 @@ void RegisterCrawlUrlFunction(ExtensionLoader &loader) {
     TableFunction func_with_limit("crawl_url", {LogicalType::VARCHAR, LogicalType::BIGINT},
                                    nullptr, CrawlUrlBind, CrawlUrlInitGlobal, CrawlUrlInitLocal);
     func_with_limit.in_out_function = CrawlUrlInOut;
-    func_with_limit.named_parameters["extract"] = LogicalType::LIST(LogicalType::VARCHAR);
     func_with_limit.named_parameters["user_agent"] = LogicalType::VARCHAR;
     func_with_limit.named_parameters["timeout"] = LogicalType::INTEGER;
     func_with_limit.named_parameters["cache"] = LogicalType::BOOLEAN;
