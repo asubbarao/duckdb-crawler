@@ -150,7 +150,6 @@ set(EXTENSION_SOURCES
     src/css_extract_function.cpp
     src/crawl_stream_function.cpp
     src/crawl_table_function.cpp
-    src/crawl_lateral_function.cpp
     src/stream_merge_function.cpp
     src/sitemap_function.cpp
     src/importhtml_function.cpp

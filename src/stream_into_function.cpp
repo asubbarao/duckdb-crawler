@@ -88,7 +88,7 @@ static void StreamIntoFunction(ClientContext &context, TableFunctionInput &data,
     conn.Query("LOAD crawler");
 
     // Initialize pipeline state for LIMIT pushdown to crawl functions
-    // This allows crawl_url in LATERAL to respect the LIMIT
+    // This allows crawl in LATERAL to respect the LIMIT
     if (bind_data.row_limit > 0) {
         InitPipelineLimit(*context.db, bind_data.row_limit);
     }

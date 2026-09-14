@@ -27,11 +27,7 @@ CrawlExtractSpec ParseExtractSpec(const string &spec);
 // Build JSON request for Rust extraction from parsed specs
 string BuildRustExtractionRequest(const vector<CrawlExtractSpec> &specs);
 
-// Register the crawl() table function
+// Register the crawl() table function (in-out: works bare and in LATERAL joins)
 void RegisterCrawlTableFunction(ExtensionLoader &loader);
-
-// Register crawl_url() for lateral joins
-// Usage: SELECT * FROM urls, LATERAL crawl_url(urls.url)
-void RegisterCrawlUrlFunction(ExtensionLoader &loader);
 
 } // namespace duckdb

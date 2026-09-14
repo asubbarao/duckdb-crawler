@@ -549,5 +549,5 @@ SELECT
     htmlpath(c.html.document, s.name_selector) as name,
     htmlpath(c.html.document, s.price_selector) as price
 FROM sites s,
-LATERAL crawl_url(s.url) c;
+LATERAL crawl(s.url) c;
 ```

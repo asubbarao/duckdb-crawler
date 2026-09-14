@@ -68,7 +68,7 @@ USING (
         current_timestamp as crawled_at
     FROM crawl(['https://example-events.com/events']) AS listing,
     LATERAL unnest(cast(htmlpath(listing.html.document, 'a.event-card@href[*]') as VARCHAR[])) AS t(event_url),
-    LATERAL crawl_url(event_url) AS c
+    LATERAL crawl(event_url) AS c
     WHERE c.status = 200
 ) AS src
 ON (events.url = src.url)

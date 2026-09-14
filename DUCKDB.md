@@ -135,7 +135,7 @@ static void CrawlFunction(ClientContext &context,
 
 ## LATERAL Join Support
 
-For `crawl_url()` used in LATERAL joins: `SELECT * FROM urls, LATERAL crawl_url(urls.url)`.
+For `crawl()` used in LATERAL joins: `SELECT * FROM urls, LATERAL crawl(urls.url)`.
 
 ### In-Out Function Pattern
 
@@ -191,7 +191,7 @@ static OperatorResultType CrawlUrlInOut(ExecutionContext &context,
 }
 
 // Register as in_out_function
-TableFunction func("crawl_url", {LogicalType::VARCHAR}, nullptr, CrawlUrlBind);
+TableFunction func("crawl", {LogicalType::VARCHAR}, nullptr, CrawlBind);
 func.in_out_function = CrawlUrlInOut;
 func.init_local = CrawlUrlInitLocal;
 ```

@@ -164,28 +164,29 @@ duckdb -unsigned -c "LOAD 'build/release/extension/crawler/crawler.duckdb_extens
 
 ## Table Functions
 
-### crawl_url() - LATERAL Join Support
+### crawl() in LATERAL Joins
 
-Use `crawl_url()` for row-by-row crawling with LATERAL joins:
+`crawl()` also works row-by-row in LATERAL joins (named parameters are not
+supported inside LATERAL; an optional second positional argument sets max_results):
 
 ```sql
 -- Crawl URLs from a table
 SELECT
     seed.category,
     c.url,
-    c.status_code,
+    c.status,
     c.html.readability.title
 FROM seed_urls seed,
-LATERAL crawl_url(seed.url) AS c
-WHERE c.status_code = 200;
+LATERAL crawl(seed.url) AS c
+WHERE c.status = 200;
 
 -- Chain with extraction
 SELECT
     c.final_url,
-    jq(c.body, 'h1').text as title,
+    jq(c.html.document, 'h1').text as title,
     c.html.schema['Product'] as product_data
 FROM urls_to_check u,
-LATERAL crawl_url(u.link) AS c;
+LATERAL crawl(u.link) AS c;
 ```
 
 ### sitemap() - Sitemap Parsing
@@ -344,7 +345,7 @@ USING (
         current_timestamp as crawled_at
     FROM crawl(['https://jobs.example.com/listings']) AS listing,
     LATERAL unnest(cast(htmlpath(listing.body, 'a.job@href[*]') as VARCHAR[])) AS t(job_url),
-    LATERAL crawl_url(job_url) AS c
+    LATERAL crawl(job_url) AS c
     WHERE c.status_code = 200
 ) AS src
 ON (src.url = jobs.url)

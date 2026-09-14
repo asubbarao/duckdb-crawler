@@ -50,7 +50,7 @@ USING (
         current_timestamp as crawled_at
     FROM crawl(['https://example-store.com/products']) AS listing,
     LATERAL unnest(cast(htmlpath(listing.html.document, 'a.product-card@href[*]') as VARCHAR[])) AS t(product_url),
-    LATERAL crawl_url(product_url) AS c
+    LATERAL crawl(product_url) AS c
     WHERE c.status = 200
 ) AS src
 ON (products.url = src.url)

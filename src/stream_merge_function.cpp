@@ -89,19 +89,19 @@ static unordered_set<string> GetExcludedValues(Connection &conn,
 	return excluded;
 }
 
-// Rewrite source query to exclude fresh URLs BEFORE crawl_url runs
+// Rewrite source query to exclude fresh URLs BEFORE crawl runs
 // This prevents HTTP requests for URLs that wouldn't be updated anyway
 //
-// Strategy: Find LATERAL crawl_url pattern and inject WHERE filter on URL source
+// Strategy: Find LATERAL crawl pattern and inject WHERE filter on URL source
 // The filter is placed BEFORE the comma that precedes LATERAL, causing DuckDB
-// to filter rows before invoking crawl_url for each row.
+// to filter rows before invoking crawl for each row.
 //
 // Example transformation:
-//   FROM urls_to_crawl utc, LATERAL crawl_url(utc.url)
+//   FROM urls_to_crawl utc, LATERAL crawl(utc.url)
 // Becomes:
 //   FROM urls_to_crawl utc
 //   WHERE utc.url NOT IN (SELECT url FROM __fresh),
-//   LATERAL crawl_url(utc.url)
+//   LATERAL crawl(utc.url)
 static string RewriteQueryWithExclusion(const string &source_query,
                                          const string &source_alias,
                                          const string &target_table,
@@ -125,14 +125,14 @@ static string RewriteQueryWithExclusion(const string &source_query,
 	fresh_cte += "    SELECT " + exclusion_cols + " FROM " + QuoteSqlIdentifier(target_table);
 	fresh_cte += " WHERE NOT (" + matched_condition + ")\n)";
 
-	// Find LATERAL crawl_url pattern
-	size_t lateral_pos = query_lower.find("lateral crawl_url");
+	// Find LATERAL crawl pattern
+	size_t lateral_pos = query_lower.find("lateral crawl(");
 	if (lateral_pos == string::npos) {
-		// No LATERAL crawl_url found, can't optimize
+		// No LATERAL crawl found, can't optimize
 		return source_query;
 	}
 
-	// Extract URL expression from crawl_url(expr)
+	// Extract URL expression from crawl(expr)
 	size_t paren_start = query.find('(', lateral_pos);
 	if (paren_start == string::npos) {
 		return source_query;

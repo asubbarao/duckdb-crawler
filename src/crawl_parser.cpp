@@ -133,7 +133,7 @@ static size_t FindClosingParen(const string &str, size_t open_pos) {
 	return string::npos;
 }
 
-// Inject max_results parameter into crawl() and crawl_url() function calls
+// Inject max_results into crawl() function calls
 // This enables LIMIT pushdown through the pipeline by stopping HTTP fetches early
 static string InjectMaxResultsIntoCrawlCalls(const string &query, int64_t limit) {
 	if (limit <= 0) {
@@ -143,58 +143,27 @@ static string InjectMaxResultsIntoCrawlCalls(const string &query, int64_t limit)
 	string result = query;
 	string limit_str = std::to_string(limit);
 
-	// Process crawl() with named parameter (works outside LATERAL)
-	// Process crawl_url() with positional parameter (works inside LATERAL)
 	size_t pos = 0;
 	while (pos < result.length()) {
 		string lower_result = StringUtil::Lower(result);
 
-		// Find next crawl( or crawl_url(
 		size_t crawl_pos = lower_result.find("crawl(", pos);
-		size_t crawl_url_pos = lower_result.find("crawl_url(", pos);
-
-		// Determine which comes first
-		bool is_crawl_url = false;
-		size_t func_pos;
-
-		if (crawl_pos == string::npos && crawl_url_pos == string::npos) {
+		if (crawl_pos == string::npos) {
 			break;
-		} else if (crawl_pos == string::npos) {
-			func_pos = crawl_url_pos;
-			is_crawl_url = true;
-		} else if (crawl_url_pos == string::npos) {
-			func_pos = crawl_pos;
-			is_crawl_url = false;
-		} else if (crawl_url_pos <= crawl_pos) {
-			// crawl_url comes first or at same position (crawl_url contains crawl)
-			func_pos = crawl_url_pos;
-			is_crawl_url = true;
-		} else {
-			// crawl comes first, but check it's not part of crawl_url/crawl_stream
-			if (func_pos > 0 && lower_result[crawl_pos - 1] == '_') {
-				pos = crawl_pos + 1;
-				continue;
-			}
-			size_t after_crawl = crawl_pos + 5;
-			if (after_crawl < lower_result.length() && lower_result[after_crawl] == '_') {
-				pos = crawl_pos + 1;
-				continue;
-			}
-			func_pos = crawl_pos;
-			is_crawl_url = false;
 		}
 
-		// Find opening paren
-		size_t paren_pos = result.find('(', func_pos);
-		if (paren_pos == string::npos) {
-			pos = func_pos + 1;
+		// Skip crawl_stream( / htmlcrawl( style names containing "crawl("
+		if (crawl_pos > 0 &&
+		    (lower_result[crawl_pos - 1] == '_' || isalnum(lower_result[crawl_pos - 1]))) {
+			pos = crawl_pos + 1;
 			continue;
 		}
 
 		// Find matching closing paren
+		size_t paren_pos = crawl_pos + 5;
 		size_t close_paren = FindClosingParen(result, paren_pos);
 		if (close_paren == string::npos) {
-			pos = func_pos + 1;
+			pos = crawl_pos + 1;
 			continue;
 		}
 
@@ -205,14 +174,14 @@ static string InjectMaxResultsIntoCrawlCalls(const string &query, int64_t limit)
 			continue;
 		}
 
-		// Inject parameter based on function type
+		// Named parameters don't work inside LATERAL, so prefer the positional
+		// max_results argument; if the call already uses named parameters,
+		// positional-after-named would be a syntax error, so append named
 		string limit_param;
-		if (is_crawl_url) {
-			// crawl_url: use positional argument (works in LATERAL)
-			limit_param = ", " + limit_str + "::BIGINT";
-		} else {
-			// crawl: use named parameter
+		if (call_content.find(":=") != string::npos) {
 			limit_param = ", max_results := " + limit_str + "::BIGINT";
+		} else {
+			limit_param = ", " + limit_str + "::BIGINT";
 		}
 
 		// Insert before closing paren
@@ -381,7 +350,7 @@ CrawlParserExtension::CrawlParserExtension() {
 
 ParserExtensionParseResult CrawlParserExtension::ParseCrawl(ParserExtensionInfo *info, const string &query) {
 	// Only handle CRAWLING MERGE INTO statements
-	// Table functions (crawl, crawl_url, htmlpath) are registered separately
+	// Table functions (crawl, htmlpath) are registered separately
 	string trimmed = Trim(query);
 	string lower = StringUtil::Lower(trimmed);
 

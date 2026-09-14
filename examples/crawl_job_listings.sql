@@ -38,7 +38,7 @@ USING (
     -- Extract job URLs from listing page
     LATERAL unnest(cast(htmlpath(listing.html.document, 'a.job-link@href[*]') as VARCHAR[])) AS t(job_url),
     -- Crawl each job page
-    LATERAL crawl_url(job_url) AS c
+    LATERAL crawl(job_url) AS c
     WHERE c.status = 200
 ) AS src
 ON (job_listings.url = src.url)

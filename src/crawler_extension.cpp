@@ -79,11 +79,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// Register crawl_stream table function for streaming crawl results
 	RegisterCrawlStreamFunction(loader);
 
-	// Register crawl() table function for clean FROM-based crawling
+	// Register crawl() table function (works bare and in LATERAL joins)
 	RegisterCrawlTableFunction(loader);
-
-	// Register crawl_url() for lateral joins
-	RegisterCrawlUrlFunction(loader);
 
 	// Register sitemap() table function for sitemap parsing
 	RegisterSitemapFunction(loader);

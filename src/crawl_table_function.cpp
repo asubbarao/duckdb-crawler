@@ -1,15 +1,14 @@
-// New crawl() table function - Rust HTTP + extraction
+// crawl() table function - Rust HTTP + extraction
 //
-// Usage:
-//   SELECT url, html.body, html.opengraph->>'title', html.schema->'Product'->>'name'
-//   FROM crawl(
-//       'SELECT url FROM my_urls',
-//       state_table = 'crawl_state',
-//       user_agent = 'Bot/1.0'
-//   )
+// Registered as an in-out function, so one function covers every position:
+//   SELECT * FROM crawl('https://example.com/')                    -- bare, single URL
+//   SELECT * FROM crawl(['https://a.com/', 'https://b.com/'])      -- bare, URL list
+//   SELECT c.* FROM urls u, LATERAL crawl(u.url) c                 -- per-row lateral
 //
-// Or with URL list:
-//   SELECT * FROM crawl(['https://example.com'], user_agent = 'Bot/1.0')
+// Bare calls run as a table-scan source (the constant argument arrives as a
+// re-delivered single-row input chunk; we ingest it once and finish by
+// emitting 0 rows). LATERAL calls run as an operator (each input row arrives
+// as its own chunk; link following may emit many rows per input row).
 //
 // The 'html' column is a STRUCT containing:
 //   - body: raw HTML content
@@ -21,6 +20,7 @@
 #include "crawler_utils.hpp"
 #include "rust_ffi.hpp"
 #include "yyjson.hpp"
+#include "pipeline_state.hpp"
 
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/extension/extension_loader.hpp"
@@ -31,6 +31,7 @@
 
 #include <set>
 #include <map>
+#include <mutex>
 
 namespace duckdb {
 
@@ -424,8 +425,6 @@ static Value BuildHtmlStructValue(const string &body, const string &content_type
 //===--------------------------------------------------------------------===//
 
 struct CrawlBindData : public TableFunctionData {
-    vector<string> urls;
-    string source_query;
     string state_table;
     string user_agent = "DuckDB-Crawler/1.0";
     int timeout_ms = 30000;
@@ -438,7 +437,8 @@ struct CrawlBindData : public TableFunctionData {
     bool use_cache = true;   // Enable HTTP response caching
     int cache_ttl_hours = 24;  // Cache TTL in hours
     int64_t max_results = -1;  // Max results to return (-1 = unlimited), for LIMIT pushdown
-    idx_t reported_cardinality = 0;  // Cardinality we report to optimizer (for LIMIT detection)
+    // Shared pipeline state for LIMIT pushdown across LATERAL calls (STREAM INTO)
+    std::shared_ptr<PipelineState> pipeline_state;
     // Proxy settings (from DuckDB http_proxy or CREATE SECRET)
     string http_proxy;
     string http_proxy_username;
@@ -457,18 +457,26 @@ struct UrlWithDepth {
 //===--------------------------------------------------------------------===//
 
 struct CrawlGlobalState : public GlobalTableFunctionState {
+    std::mutex lock;                           // Operator mode may run multi-threaded
     vector<CrawlResultEntry> pending_results;  // Results from current batch
     idx_t result_idx = 0;                      // Index into pending_results
-    idx_t next_url_idx = 0;                    // Next URL from initial list
     std::set<string> processed_urls;           // Already crawled (from state table)
     vector<UrlWithDepth> url_queue;            // URLs to crawl with depth tracking
     idx_t queue_idx = 0;                       // Next index in url_queue
     bool initialized = false;
-    bool finished = false;
+    bool finished = false;                     // Limit reached or interrupted - stop everything
     int64_t results_returned = 0;              // Count of results returned (for max_results)
     int64_t limit_from_query = -1;             // LIMIT value pushed down from query (-1 = unlimited)
+    // Bare-call (table-scan source) handling: the same constant input chunk is
+    // re-delivered until we emit 0 rows, so ingest it exactly once
+    bool source_mode = false;
+    bool source_done = false;
 
     idx_t MaxThreads() const override { return 1; }
+};
+
+struct CrawlLocalState : public LocalTableFunctionState {
+    bool chunk_ingested = false;  // Current input chunk's URLs already queued
 };
 
 //===--------------------------------------------------------------------===//
@@ -626,18 +634,11 @@ static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionB
         bind_data->http_proxy_password = setting_value.ToString();
     }
 
-    // First argument: URL list or single URL string
-    auto &first_arg = input.inputs[0];
-    if (first_arg.type().id() == LogicalTypeId::LIST) {
-        auto &url_list = ListValue::GetChildren(first_arg);
-        for (auto &url_val : url_list) {
-            if (!url_val.IsNull()) {
-                bind_data->urls.push_back(StringValue::Get(url_val));
-            }
-        }
-    } else {
-        // Single URL string
-        bind_data->urls.push_back(StringValue::Get(first_arg));
+    // URLs arrive through the input chunk at execution time (in-out function).
+    // Optional second positional argument: max_results - named parameters don't
+    // work inside LATERAL, so LIMIT pushdown injection uses this positional form.
+    if (input.inputs.size() > 1 && !input.inputs[1].IsNull()) {
+        bind_data->max_results = input.inputs[1].GetValue<int64_t>();
     }
 
     // Named parameters
@@ -669,6 +670,11 @@ static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionB
             bind_data->max_results = kv.second.GetValue<int64_t>();
         }
     }
+
+    // Shared pipeline state for LIMIT pushdown across LATERAL calls
+    // (created by STREAM INTO / CRAWLING MERGE before running the query;
+    // max_results itself is enforced locally via results_returned)
+    bind_data->pipeline_state = GetPipelineState(*context.db);
 
     // Return columns
     return_types.push_back(LogicalType::VARCHAR);  // url
@@ -725,6 +731,10 @@ static unique_ptr<GlobalTableFunctionState> CrawlInitGlobal(ClientContext &conte
                                                              TableFunctionInitInput &input) {
     auto state = make_uniq<CrawlGlobalState>();
 
+    // Only PhysicalTableScan (bare call) passes its operator here;
+    // PhysicalTableInOutFunction (LATERAL) does not
+    state->source_mode = bool(input.op);
+
     // LIMIT pushdown: compare estimated_cardinality with our reported cardinality
     // If estimated < reported, LIMIT was applied by the optimizer
     if (input.op) {
@@ -738,45 +748,66 @@ static unique_ptr<GlobalTableFunctionState> CrawlInitGlobal(ClientContext &conte
     return std::move(state);
 }
 
+static unique_ptr<LocalTableFunctionState> CrawlInitLocal(ExecutionContext &context,
+                                                           TableFunctionInitInput &input,
+                                                           GlobalTableFunctionState *global_state) {
+    return make_uniq<CrawlLocalState>();
+}
+
 //===--------------------------------------------------------------------===//
-// Main Function - Streaming with Rust HTTP + Link Following
+// Main In-Out Function - Streaming with Rust HTTP + Link Following
+// Handles bare calls (table-scan source) and LATERAL joins (operator)
 //===--------------------------------------------------------------------===//
 
-static void CrawlFunction(ClientContext &context, TableFunctionInput &data, DataChunk &output) {
+static OperatorResultType CrawlInOut(ExecutionContext &context, TableFunctionInput &data,
+                                     DataChunk &input, DataChunk &output) {
     auto &bind_data = data.bind_data->CastNoConst<CrawlBindData>();
     auto &state = data.global_state->Cast<CrawlGlobalState>();
+    auto &local_state = data.local_state->Cast<CrawlLocalState>();
+    auto &client = context.client;
+    std::lock_guard<std::mutex> guard(state.lock);
+
+    if (state.finished) {
+        output.SetCardinality(0);
+        return OperatorResultType::FINISHED;
+    }
 
     // Initialize on first call
     if (!state.initialized) {
         state.initialized = true;
 
-        Connection conn(*context.db);
-
-        // Execute source query if provided
-        if (!bind_data.source_query.empty()) {
-            auto query_result = conn.Query(bind_data.source_query);
-            if (query_result->HasError()) {
-                throw IOException("crawl source query error: " + query_result->GetError());
-            }
-            while (auto chunk = query_result->Fetch()) {
-                for (idx_t i = 0; i < chunk->size(); i++) {
-                    auto val = chunk->GetValue(0, i);
-                    if (!val.IsNull()) {
-                        bind_data.urls.push_back(val.ToString());
-                    }
-                }
-            }
-        }
-
         // Load processed URLs from state table
         if (!bind_data.state_table.empty()) {
+            Connection conn(*client.db);
             EnsureStateTable(conn, bind_data.state_table);
             state.processed_urls = LoadProcessedUrls(conn, bind_data.state_table);
         }
+    }
 
-        // Initialize URL queue with initial URLs at depth 1
-        for (const auto &url : bind_data.urls) {
-            state.url_queue.push_back({url, 1});
+    // Ingest URLs from the current input chunk once (guarded so the re-delivered
+    // constant chunk of a bare call isn't ingested twice)
+    if (!local_state.chunk_ingested && !(state.source_mode && state.source_done)) {
+        for (idx_t i = 0; i < input.size(); i++) {
+            Value url_val = input.GetValue(0, i);
+            if (url_val.IsNull()) {
+                continue;
+            }
+            if (url_val.type().id() == LogicalTypeId::LIST) {
+                for (auto &child : ListValue::GetChildren(url_val)) {
+                    if (!child.IsNull() && !StringValue::Get(child).empty()) {
+                        state.url_queue.push_back({StringValue::Get(child), 1});
+                    }
+                }
+            } else {
+                string url = url_val.ToString();
+                if (!url.empty()) {
+                    state.url_queue.push_back({url, 1});
+                }
+            }
+        }
+        local_state.chunk_ingested = true;
+        if (state.source_mode) {
+            state.source_done = true;
         }
     }
 
@@ -784,7 +815,7 @@ static void CrawlFunction(ClientContext &context, TableFunctionInput &data, Data
     unique_ptr<Connection> conn_holder;
     Connection *conn = nullptr;
     if (!bind_data.state_table.empty()) {
-        conn_holder = make_uniq<Connection>(*context.db);
+        conn_holder = make_uniq<Connection>(*client.db);
         conn = conn_holder.get();
     }
 
@@ -809,6 +840,12 @@ static void CrawlFunction(ClientContext &context, TableFunctionInput &data, Data
             break;
         }
 
+        // Shared pipeline LIMIT reached (STREAM INTO across LATERAL calls)
+        if (bind_data.pipeline_state && bind_data.pipeline_state->stopped.load()) {
+            state.finished = true;
+            break;
+        }
+
         // If we have pending results, yield ONE
         if (state.result_idx < state.pending_results.size()) {
             auto &entry = state.pending_results[state.result_idx++];
@@ -823,6 +860,14 @@ static void CrawlFunction(ClientContext &context, TableFunctionInput &data, Data
             output.SetValue(7, count, Value::INTEGER(entry.depth));
             count++;
             state.results_returned++;  // Track for max_results limit
+
+            // Decrement shared pipeline counter (LIMIT pushdown across LATERAL)
+            if (bind_data.pipeline_state) {
+                int64_t remaining = --bind_data.pipeline_state->remaining;
+                if (remaining <= 0) {
+                    bind_data.pipeline_state->stopped = true;
+                }
+            }
 
             // Mark as processed (before extracting links to avoid re-queuing)
             state.processed_urls.insert(entry.url);
@@ -863,13 +908,12 @@ static void CrawlFunction(ClientContext &context, TableFunctionInput &data, Data
             }
         }
 
-        // No more URLs to fetch
+        // Queue drained (more input rows may still arrive in operator mode)
         if (url_to_fetch.empty()) {
-            state.finished = true;
             break;
         }
 
-        Connection cache_conn(*context.db);
+        Connection cache_conn(*client.db);
 
         // Check cache first
         CrawlResultEntry result;
@@ -891,7 +935,7 @@ static void CrawlFunction(ClientContext &context, TableFunctionInput &data, Data
             string http_proxy_username = bind_data.http_proxy_username;
             string http_proxy_password = bind_data.http_proxy_password;
             std::map<string, string> extra_headers = bind_data.extra_headers;
-            ApplyHttpSecrets(context, url_to_fetch, http_proxy, http_proxy_username, http_proxy_password, extra_headers);
+            ApplyHttpSecrets(client, url_to_fetch, http_proxy, http_proxy_username, http_proxy_password, extra_headers);
 
             string request_json = BuildBatchCrawlRequest(
                 {url_to_fetch},
@@ -929,150 +973,19 @@ static void CrawlFunction(ClientContext &context, TableFunctionInput &data, Data
     }
 
     output.SetCardinality(count);
-}
 
-//===--------------------------------------------------------------------===//
-// LATERAL Join Support (In-Out Function)
-//===--------------------------------------------------------------------===//
-
-struct CrawlLateralLocalState : public LocalTableFunctionState {
-    // No state needed - each row is independent
-};
-
-static unique_ptr<LocalTableFunctionState> CrawlLateralInitLocal(ExecutionContext &context,
-                                                                   TableFunctionInitInput &input,
-                                                                   GlobalTableFunctionState *global_state) {
-    return make_uniq<CrawlLateralLocalState>();
-}
-
-static OperatorResultType CrawlInOut(ExecutionContext &context, TableFunctionInput &data,
-                                      DataChunk &input, DataChunk &output) {
-    auto &bind_data = data.bind_data->CastNoConst<CrawlBindData>();
-
-    if (input.size() == 0) {
-        return OperatorResultType::NEED_MORE_INPUT;
+    if (state.finished) {
+        // Limit reached or interrupted - stop the whole crawl
+        return OperatorResultType::FINISHED;
     }
-
-    idx_t count = 0;
-
-    for (idx_t i = 0; i < input.size() && count < STANDARD_VECTOR_SIZE; i++) {
-        Value url_val = input.GetValue(0, i);
-
-        if (url_val.IsNull()) {
-            output.SetValue(0, count, Value());
-            output.SetValue(1, count, Value());
-            output.SetValue(2, count, Value());
-            output.SetValue(3, count, BuildHtmlStructValue("", ""));
-            output.SetValue(4, count, Value());
-            output.SetValue(5, count, Value("NULL URL"));
-            output.SetValue(6, count, Value());
-            output.SetValue(7, count, Value());
-            output.SetValue(8, count, Value());
-            count++;
-            continue;
-        }
-
-        string url = StringValue::Get(url_val);
-        if (url.empty()) continue;
-
-        // Build minimal batch request for single URL
-        yyjson_mut_doc *doc = yyjson_mut_doc_new(nullptr);
-        yyjson_mut_val *root = yyjson_mut_obj(doc);
-        yyjson_mut_doc_set_root(doc, root);
-
-        yyjson_mut_val *urls_arr = yyjson_mut_arr(doc);
-        yyjson_mut_arr_add_strcpy(doc, urls_arr, url.c_str());
-        yyjson_mut_obj_add_val(doc, root, "urls", urls_arr);
-
-        yyjson_mut_obj_add_strcpy(doc, root, "user_agent", bind_data.user_agent.c_str());
-        yyjson_mut_obj_add_uint(doc, root, "timeout_ms", bind_data.timeout_ms);
-        yyjson_mut_obj_add_uint(doc, root, "concurrency", 1);
-
-        size_t len = 0;
-        char *json_str = yyjson_mut_write(doc, 0, &len);
-        yyjson_mut_doc_free(doc);
-
-        if (!json_str) {
-            output.SetValue(0, count, Value(url));
-            output.SetValue(1, count, Value());
-            output.SetValue(2, count, Value());
-            output.SetValue(3, count, BuildHtmlStructValue("", ""));
-            output.SetValue(4, count, Value());
-            output.SetValue(5, count, Value("Failed to serialize request"));
-            output.SetValue(6, count, Value());
-            output.SetValue(7, count, Value());
-            output.SetValue(8, count, Value());
-            count++;
-            continue;
-        }
-
-        string request_json(json_str, len);
-        free(json_str);
-
-        string response_json = CrawlBatchWithRust(request_json);
-
-        // Parse response
-        yyjson_doc *resp_doc = yyjson_read(response_json.c_str(), response_json.size(), 0);
-        if (!resp_doc) {
-            output.SetValue(0, count, Value(url));
-            output.SetValue(1, count, Value());
-            output.SetValue(2, count, Value());
-            output.SetValue(3, count, BuildHtmlStructValue("", ""));
-            output.SetValue(4, count, Value());
-            output.SetValue(5, count, Value("Failed to parse response"));
-            output.SetValue(6, count, Value());
-            output.SetValue(7, count, Value());
-            output.SetValue(8, count, Value());
-            count++;
-            continue;
-        }
-
-        yyjson_val *resp_root = yyjson_doc_get_root(resp_doc);
-        yyjson_val *results_arr = yyjson_obj_get(resp_root, "results");
-
-        if (results_arr && yyjson_is_arr(results_arr) && yyjson_arr_size(results_arr) > 0) {
-            yyjson_val *item = yyjson_arr_get_first(results_arr);
-
-            yyjson_val *url_val_json = yyjson_obj_get(item, "url");
-            yyjson_val *final_url_val_json = yyjson_obj_get(item, "final_url");
-            yyjson_val *status_val = yyjson_obj_get(item, "status");
-            yyjson_val *content_type_val = yyjson_obj_get(item, "content_type");
-            yyjson_val *body_val = yyjson_obj_get(item, "body");
-            yyjson_val *error_val = yyjson_obj_get(item, "error");
-            yyjson_val *time_val = yyjson_obj_get(item, "response_time_ms");
-
-            string result_url = url_val_json ? yyjson_get_str(url_val_json) : url;
-            string final_url = final_url_val_json ? yyjson_get_str(final_url_val_json) : result_url;
-            int status = status_val ? yyjson_get_int(status_val) : 0;
-            string content_type = content_type_val ? yyjson_get_str(content_type_val) : "";
-            string body = body_val ? yyjson_get_str(body_val) : "";
-            string error = error_val ? yyjson_get_str(error_val) : "";
-            int64_t response_time = time_val ? yyjson_get_int(time_val) : 0;
-
-            output.SetValue(0, count, Value(result_url));
-            output.SetValue(1, count, Value(status));
-            output.SetValue(2, count, Value(content_type));
-            output.SetValue(3, count, BuildHtmlStructValue(body, content_type, result_url));
-            output.SetValue(4, count, final_url.empty() ? Value() : Value(final_url));
-            output.SetValue(5, count, error.empty() ? Value() : Value(error));
-            output.SetValue(6, count, Value::BIGINT(response_time));
-            output.SetValue(7, count, Value());
-        } else {
-            output.SetValue(0, count, Value(url));
-            output.SetValue(1, count, Value());
-            output.SetValue(2, count, Value());
-            output.SetValue(3, count, BuildHtmlStructValue("", "", url));
-            output.SetValue(4, count, Value());
-            output.SetValue(5, count, Value("No results"));
-            output.SetValue(6, count, Value());
-            output.SetValue(7, count, Value());
-        }
-
-        yyjson_doc_free(resp_doc);
-        count++;
+    if (count > 0) {
+        // More work may remain for this chunk (queue/pending) - ask to be
+        // called again with the same chunk
+        return OperatorResultType::HAVE_MORE_OUTPUT;
     }
-
-    output.SetCardinality(count);
+    // Chunk fully processed and queue drained - ready for the next chunk.
+    // In source mode the 0-row output ends the scan (source_done stays set).
+    local_state.chunk_ingested = false;
     return OperatorResultType::NEED_MORE_INPUT;
 }
 
@@ -1097,23 +1010,23 @@ void RegisterCrawlTableFunction(ExtensionLoader &loader) {
         func.named_parameters["max_results"] = LogicalType::BIGINT;
     };
 
-    // crawl() with URL list (batch mode)
-    TableFunction list_func("crawl",
-                            {LogicalType::LIST(LogicalType::VARCHAR)},
-                            CrawlFunction, CrawlBind, CrawlInitGlobal);
-    list_func.cardinality = CrawlCardinality;  // Enable LIMIT pushdown detection
-    add_params(list_func);
-
-    // crawl() with single URL (also batch mode, no LATERAL)
-    TableFunction single_func("crawl",
-                              {LogicalType::VARCHAR},
-                              CrawlFunction, CrawlBind, CrawlInitGlobal);
-    single_func.cardinality = CrawlCardinality;  // Enable LIMIT pushdown detection
-    add_params(single_func);
+    // All overloads are in-out functions: bare calls run as a table-scan
+    // source, LATERAL calls as an operator. The optional BIGINT positional
+    // argument is max_results (named parameters don't work inside LATERAL).
+    auto make_inout = [&](vector<LogicalType> arguments) {
+        TableFunction func("crawl", std::move(arguments), nullptr, CrawlBind,
+                           CrawlInitGlobal, CrawlInitLocal);
+        func.in_out_function = CrawlInOut;
+        func.cardinality = CrawlCardinality;  // Enable LIMIT pushdown detection
+        add_params(func);
+        return func;
+    };
 
     TableFunctionSet crawl_set("crawl");
-    crawl_set.AddFunction(list_func);
-    crawl_set.AddFunction(single_func);
+    crawl_set.AddFunction(make_inout({LogicalType::VARCHAR}));
+    crawl_set.AddFunction(make_inout({LogicalType::LIST(LogicalType::VARCHAR)}));
+    crawl_set.AddFunction(make_inout({LogicalType::VARCHAR, LogicalType::BIGINT}));
+    crawl_set.AddFunction(make_inout({LogicalType::LIST(LogicalType::VARCHAR), LogicalType::BIGINT}));
     loader.RegisterFunction(crawl_set);
 }
 

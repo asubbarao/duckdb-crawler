@@ -1,0 +1,41 @@
+# name: test/sql/crawl.test
+# description: Test crawl() bare (source mode) and in LATERAL joins
+# group: [crawler]
+
+require crawler
+
+# Bare call must return exactly one row and terminate (regression: infinite re-crawl loop)
+query I
+SELECT count(*) FROM crawl('https://example.com/');
+----
+1
+
+query I
+SELECT status FROM crawl('https://example.com/');
+----
+200
+
+# Bare call with URL list
+query I
+SELECT count(*) FROM crawl(['https://example.com/', 'https://example.org/']);
+----
+2
+
+# LATERAL join, including duplicate URLs
+query I
+SELECT count(*)
+FROM (VALUES ('https://example.com/'), ('https://example.com/')) t(u),
+     LATERAL crawl(t.u) c;
+----
+2
+
+# Positional max_results argument (used by LIMIT pushdown inside LATERAL)
+query I
+SELECT count(*) FROM crawl(['https://example.com/', 'https://example.org/'], 1);
+----
+1
+
+# crawl_url() was merged into crawl() and no longer exists
+statement error
+SELECT * FROM crawl_url('https://example.com/');
+----
