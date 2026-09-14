@@ -19,7 +19,7 @@ json5 = "0.4"
 # Decode HTML entities in script content (Pinia/Vue SSR)
 htmlescape = "0.3"
 # HTTP client for Rust-side crawling
-reqwest = { version = "0.12", features = ["rustls-tls", "gzip", "brotli", "deflate", "blocking"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate", "blocking"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 futures = "0.3"
 # Simple blocking HTTP client (no tokio dependencies)
@@ -29,7 +29,7 @@ url = "2.5"
 texting_robots = "0.2"  # robots.txt parser
 quick-xml = "0.37"      # XML sitemap parser
 # Readability - extract article content from HTML
-readability = "0.3"
+readability = { version = "0.3", default-features = false }
 
 [profile.release]
 lto = "thin"
