@@ -16,20 +16,23 @@ Before adding new features to a large file, split it first:
 3. Update `CMakeLists.txt` to include new sources
 4. Then add the new feature
 
-### Suggested Structure
+### Current Structure
 ```
 src/
-├── crawler_extension.cpp  # Entry point, registration only
-├── crawler_function.cpp   # Table function binding, main orchestration
-├── crawler_worker.cpp     # CrawlWorker thread logic
-├── thread_utils.cpp       # ThreadSafeQueue, ThreadSafeDomainMap
-├── sitemap_discovery.cpp  # Sitemap fetching/caching
-├── utils.cpp              # DecompressGzip, GenerateSurtKey, helpers
-├── robots_parser.cpp      # robots.txt parsing
-├── sitemap_parser.cpp     # XML sitemap parsing
-├── link_parser.cpp        # HTML link extraction
-└── include/               # Headers
+├── crawler_extension.cpp    # Entry point, registration only
+├── crawl_table_function.cpp # crawl() in-out function (bare + LATERAL)
+├── crawl_parser.cpp         # CRAWLING MERGE INTO parser extension
+├── stream_merge_function.cpp# stream_merge_internal() for CRAWLING MERGE
+├── css_extract_function.cpp # htmlpath()/jq()/page_info() scalar functions
+├── sitemap_function.cpp     # sitemap() table function
+├── importhtml_function.cpp  # read_html() table function
+├── crawler_utils.cpp        # Shared helpers (DecompressGzip, quoting, ...)
+├── pipeline_state.cpp       # Shared LIMIT-pushdown state across LATERAL
+├── rust_ffi.cpp             # FFI into rust_parser (HTTP, parsing, robots)
+└── include/                 # Headers
 ```
+HTTP, HTML parsing, extraction, robots.txt, and sitemaps are all implemented
+in `rust_parser/` and reached through `rust_ffi.cpp`.
 
 ## Build Commands
 
@@ -172,7 +175,7 @@ ParserExtensionPlanResult MyParserExtension::Plan(ParserExtensionInfo *info,
 ### URL Pattern Filtering (LIKE)
 
 ```cpp
-// In crawler_function.cpp
+// In crawl_table_function.cpp
 static bool MatchesLikePattern(const std::string &url, const std::string &pattern) {
     // SQL LIKE: % = any chars, _ = single char
     size_t url_pos = 0, pat_pos = 0;
@@ -245,15 +248,16 @@ if (response.body.size() > max_response_bytes) {
 | File | Purpose |
 |------|---------|
 | `src/crawler_extension.cpp` | Extension entry, registers parser & functions |
-| `src/crawl_parser.cpp` | CRAWL syntax parsing (INTO, WHERE, WITH) |
-| `src/crawler_function.cpp` | Table function binding, main orchestration |
-| `src/crawler_worker.cpp` | CrawlWorker thread logic (TODO: extract) |
-| `src/thread_utils.cpp` | ThreadSafeQueue, ThreadSafeDomainMap (TODO: extract) |
-| `src/sitemap_discovery.cpp` | Sitemap fetching/caching (TODO: extract) |
-| `src/utils.cpp` | Helpers: DecompressGzip, GenerateSurtKey (TODO: extract) |
-| `src/robots_parser.cpp` | robots.txt parsing |
-| `src/sitemap_parser.cpp` | Sitemap XML parsing |
-| `src/link_parser.cpp` | HTML link extraction |
+| `src/crawl_table_function.cpp` | crawl() in-out function (bare + LATERAL, link following, cache, state table) |
+| `src/crawl_parser.cpp` | CRAWLING MERGE INTO syntax parsing |
+| `src/stream_merge_function.cpp` | Merge execution for CRAWLING MERGE |
+| `src/css_extract_function.cpp` | htmlpath()/jq()/page_info() scalar functions |
+| `src/sitemap_function.cpp` | sitemap() table function |
+| `src/importhtml_function.cpp` | read_html() table function |
+| `src/crawler_utils.cpp` | Shared helpers |
+| `src/pipeline_state.cpp` | LIMIT-pushdown state shared across LATERAL calls |
+| `src/rust_ffi.cpp` | FFI into rust_parser (HTTP, parsing, robots, sitemaps) |
+| `rust_parser/` | Rust implementation: reqwest HTTP, extraction, robots.txt |
 | `CMakeLists.txt` | Build config, link libraries |
 | `vcpkg.json` | C++ dependencies |
 | `extension_config.cmake` | DuckDB extension loader config |

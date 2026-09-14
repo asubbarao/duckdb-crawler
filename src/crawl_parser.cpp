@@ -152,7 +152,7 @@ static string InjectMaxResultsIntoCrawlCalls(const string &query, int64_t limit)
 			break;
 		}
 
-		// Skip crawl_stream( / htmlcrawl( style names containing "crawl("
+		// Skip other function names that merely contain "crawl("
 		if (crawl_pos > 0 &&
 		    (lower_result[crawl_pos - 1] == '_' || isalnum(lower_result[crawl_pos - 1]))) {
 			pos = crawl_pos + 1;

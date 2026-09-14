@@ -3,7 +3,6 @@
 #include "crawler_extension.hpp"
 #include "crawl_parser.hpp"
 #include "css_extract_function.hpp"
-#include "crawl_stream_function.hpp"
 #include "crawl_table_function.hpp"
 #include "stream_merge_function.hpp"
 #include "sitemap_function.hpp"
@@ -75,9 +74,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	// Register $() scalar function for CSS extraction
 	RegisterCssExtractFunction(loader);
-
-	// Register crawl_stream table function for streaming crawl results
-	RegisterCrawlStreamFunction(loader);
 
 	// Register crawl() table function (works bare and in LATERAL joins)
 	RegisterCrawlTableFunction(loader);

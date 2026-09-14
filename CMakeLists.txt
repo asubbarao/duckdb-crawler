@@ -145,20 +145,14 @@ include_directories(src/include)
 
 set(EXTENSION_SOURCES
     src/crawler_extension.cpp
-    src/crawler_function.cpp
     src/crawler_utils.cpp
     src/css_extract_function.cpp
-    src/crawl_stream_function.cpp
     src/crawl_table_function.cpp
     src/stream_merge_function.cpp
     src/sitemap_function.cpp
     src/importhtml_function.cpp
-    src/thread_utils.cpp
-    src/robots_parser.cpp
+    src/pipeline_state.cpp
     src/crawl_parser.cpp
-    src/sitemap_parser.cpp
-    src/link_parser.cpp
-    src/json_path_evaluator.cpp
 )
 
 # Add Rust FFI wrapper if Rust parser is available
