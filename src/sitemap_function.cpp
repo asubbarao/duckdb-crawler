@@ -3,6 +3,7 @@
 
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "crawler_compat.hpp"
 #include "rust_ffi.hpp"
 #include "yyjson.hpp"
 
@@ -138,7 +139,7 @@ static vector<SitemapEntry> ParseSitemapResponse(const string &json, const strin
 static unique_ptr<FunctionData> SitemapBind(ClientContext &context,
                                              TableFunctionBindInput &input,
                                              vector<LogicalType> &return_types,
-                                             vector<string> &names) {
+                                             vector<CrawlerResultName> &names) {
     auto bind_data = make_uniq<SitemapBindData>();
 
     // First argument is the sitemap URL

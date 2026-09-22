@@ -17,6 +17,7 @@
 //   - schema: combined JSON-LD + microdata as JSON
 
 #include "crawl_table_function.hpp"
+#include "crawler_compat.hpp"
 #include "crawler_utils.hpp"
 #include "rust_ffi.hpp"
 #include "yyjson.hpp"
@@ -605,7 +606,8 @@ static void SaveToCache(Connection &conn, const CrawlResultEntry &entry) {
 //===--------------------------------------------------------------------===//
 
 static unique_ptr<FunctionData> CrawlBind(ClientContext &context, TableFunctionBindInput &input,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types,
+                                           vector<CrawlerResultName> &names) {
     auto bind_data = make_uniq<CrawlBindData>();
 
     // Read extension settings as defaults

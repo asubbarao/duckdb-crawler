@@ -64,7 +64,11 @@ class CrawlParserExtension : public ParserExtension {
 public:
 	CrawlParserExtension();
 
+#if CRAWLER_DUCKDB_MAJOR_VERSION >= 2
+	static ParserExtensionParseResult ParseCrawl(ParserExtensionInfo *info, const vector<SimpleToken> &tokens);
+#else
 	static ParserExtensionParseResult ParseCrawl(ParserExtensionInfo *info, const string &query);
+#endif
 	static ParserExtensionPlanResult PlanCrawl(ParserExtensionInfo *info, ClientContext &context,
 	                                           unique_ptr<ParserExtensionParseData> parse_data);
 };

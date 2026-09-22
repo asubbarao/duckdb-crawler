@@ -2,6 +2,7 @@
 // Similar to Google Sheets =IMPORTHTML() - extracts tables from web pages
 
 #include "importhtml_function.hpp"
+#include "crawler_compat.hpp"
 #include "rust_ffi.hpp"
 #include "yyjson.hpp"
 #include "duckdb.hpp"
@@ -467,9 +468,9 @@ static void InferColumnTypes(ReadHtmlBindData &bind_data) {
 //===--------------------------------------------------------------------===//
 
 static unique_ptr<FunctionData> ReadHtmlBind(ClientContext &context,
-                                                TableFunctionBindInput &input,
-                                                vector<LogicalType> &return_types,
-                                                vector<string> &names) {
+                                              TableFunctionBindInput &input,
+                                              vector<LogicalType> &return_types,
+                                                vector<CrawlerResultName> &names) {
     auto bind_data = make_uniq<ReadHtmlBindData>();
 
     // First argument: URL
@@ -529,7 +530,7 @@ static unique_ptr<FunctionData> ReadHtmlBind(ClientContext &context,
                 c = '_';
             }
         }
-        names.push_back(col_name);
+        names.emplace_back(col_name);
 
         // Use inferred type
         switch (bind_data->column_types[i]) {
