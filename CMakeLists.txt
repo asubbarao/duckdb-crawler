@@ -163,12 +163,6 @@ endif()
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})
 
-# DuckDB 2.0 changed several extension-facing APIs (identifiers, parser
-# callbacks and catalog function ownership). Keep the source compatible with
-# both the 1.x release branches and DuckDB main.
-target_compile_definitions(${EXTENSION_NAME} PRIVATE CRAWLER_DUCKDB_MAJOR_VERSION=${DUCKDB_MAJOR_VERSION})
-target_compile_definitions(${LOADABLE_EXTENSION_NAME} PRIVATE CRAWLER_DUCKDB_MAJOR_VERSION=${DUCKDB_MAJOR_VERSION})
-
 target_link_libraries(${EXTENSION_NAME} ZLIB::ZLIB LibXml2::LibXml2)
 target_link_libraries(${LOADABLE_EXTENSION_NAME} ZLIB::ZLIB LibXml2::LibXml2)
 

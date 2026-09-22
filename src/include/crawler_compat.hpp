@@ -1,5 +1,6 @@
 #pragma once
 
+#include "crawler_compat_config.hpp"
 #include "duckdb/common/string.hpp"
 #include "duckdb/common/vector.hpp"
 #include "duckdb/parser/expression/columnref_expression.hpp"
@@ -7,13 +8,13 @@
 #include "duckdb/parser/tableref.hpp"
 #include "duckdb/main/query_result.hpp"
 
-#if CRAWLER_DUCKDB_MAJOR_VERSION >= 2
+#if CRAWLER_DUCKDB_V2
 #include "duckdb/common/identifier.hpp"
 #endif
 
 namespace duckdb {
 
-#if CRAWLER_DUCKDB_MAJOR_VERSION >= 2
+#if CRAWLER_DUCKDB_V2
 using CrawlerResultName = Identifier;
 
 inline const string &CrawlerIdentifierName(const Identifier &identifier) {
@@ -57,7 +58,7 @@ inline string CrawlerTableAlias(const TableRef &ref) {
 
 inline vector<string> CrawlerQueryResultNames(const QueryResult &result) {
 	vector<string> names;
-#if CRAWLER_DUCKDB_MAJOR_VERSION >= 2
+#if CRAWLER_DUCKDB_V2
 	for (const auto &name : result.GetNames()) {
 		names.push_back(CrawlerIdentifierName(name));
 	}
@@ -68,7 +69,7 @@ inline vector<string> CrawlerQueryResultNames(const QueryResult &result) {
 }
 
 inline const vector<LogicalType> &CrawlerQueryResultTypes(const QueryResult &result) {
-#if CRAWLER_DUCKDB_MAJOR_VERSION >= 2
+#if CRAWLER_DUCKDB_V2
 	return result.GetTypes();
 #else
 	return result.types;

@@ -3,7 +3,7 @@
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/parser/parser.hpp"
 #include "duckdb/parser/statement/merge_into_statement.hpp"
-#if CRAWLER_DUCKDB_MAJOR_VERSION >= 2
+#if CRAWLER_DUCKDB_V2
 #include "duckdb/parser/query_node/merge_query_node.hpp"
 #endif
 #include "duckdb/parser/expression/columnref_expression.hpp"
@@ -283,7 +283,7 @@ static ParserExtensionParseResult ParseCrawlingMerge(const string &query) {
 
 	// Extract the parsed MergeIntoStatement
 	auto &merge_stmt = parser.statements[0]->Cast<MergeIntoStatement>();
-#if CRAWLER_DUCKDB_MAJOR_VERSION >= 2
+#if CRAWLER_DUCKDB_V2
 	auto &merge_node = *merge_stmt.node;
 #else
 	auto &merge_node = merge_stmt;
@@ -379,7 +379,7 @@ static ParserExtensionParseResult ParseCrawlText(ParserExtensionInfo *info, cons
 	return ParserExtensionParseResult();
 }
 
-#if CRAWLER_DUCKDB_MAJOR_VERSION >= 2
+#if CRAWLER_DUCKDB_V2
 ParserExtensionParseResult CrawlParserExtension::ParseCrawl(ParserExtensionInfo *info,
                                                             const vector<SimpleToken> &tokens) {
 	string query;
@@ -421,7 +421,7 @@ ParserExtensionPlanResult CrawlParserExtension::PlanCrawl(ParserExtensionInfo *i
 			throw BinderException("CRAWLING MERGE INTO: stream_merge_internal function not found");
 		}
 
-#if CRAWLER_DUCKDB_MAJOR_VERSION >= 2
+#if CRAWLER_DUCKDB_V2
 		result.function = *table_function_catalog_entry.functions.functions[0];
 #else
 		result.function = table_function_catalog_entry.functions.functions[0];

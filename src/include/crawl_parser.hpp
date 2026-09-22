@@ -1,5 +1,6 @@
 #pragma once
 
+#include "crawler_compat_config.hpp"
 #include "duckdb.hpp"
 #include "duckdb/parser/parser_extension.hpp"
 #include "duckdb/parser/tableref.hpp"
@@ -64,7 +65,7 @@ class CrawlParserExtension : public ParserExtension {
 public:
 	CrawlParserExtension();
 
-#if CRAWLER_DUCKDB_MAJOR_VERSION >= 2
+#if CRAWLER_DUCKDB_V2
 	static ParserExtensionParseResult ParseCrawl(ParserExtensionInfo *info, const vector<SimpleToken> &tokens);
 #else
 	static ParserExtensionParseResult ParseCrawl(ParserExtensionInfo *info, const string &query);
