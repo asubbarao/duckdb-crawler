@@ -1175,7 +1175,7 @@ mod tests {
         let jsonld = extract_jsonld_objects(&document);
 
         assert!(jsonld.contains_key("Product"));
-        let product = &jsonld["Product"];
+        let product = jsonld["Product"].as_array().unwrap().first().unwrap();
         assert_eq!(product["name"], "Test Product");
         assert_eq!(product["offers"]["price"], "19.99");
     }
