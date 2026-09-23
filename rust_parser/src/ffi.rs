@@ -5,7 +5,7 @@ use std::ffi::{c_char, CStr, CString};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn tokio_runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -705,8 +705,128 @@ fn extract_domain(url: &str) -> String {
         .unwrap_or_default()
 }
 
-/// Per-domain rate limiter
-type DomainRateLimiter = Arc<Mutex<HashMap<String, std::time::Instant>>>;
+const MAX_BACKOFF_SECS: u64 = 600;
+
+/// Per-domain gate: crawl-delay reservation + 429 block.
+#[derive(Debug)]
+struct DomainLimitState {
+    next_allowed: Instant,
+    blocked_until: Option<Instant>,
+    consecutive_429s: u32,
+}
+
+impl DomainLimitState {
+    fn new(now: Instant) -> Self {
+        Self {
+            next_allowed: now,
+            blocked_until: None,
+            consecutive_429s: 0,
+        }
+    }
+
+    fn gate(&self) -> Instant {
+        match self.blocked_until {
+            Some(b) => self.next_allowed.max(b),
+            None => self.next_allowed,
+        }
+    }
+}
+
+/// Per-domain rate limiter (shared across concurrent batch tasks).
+type DomainRateLimiter = Arc<Mutex<HashMap<String, DomainLimitState>>>;
+
+/// Process-wide limiter. crawl() sends one URL per FFI call, so a limiter
+/// built per call would forget the last request (and any 429) immediately.
+fn global_rate_limiter() -> DomainRateLimiter {
+    static LIMITER: OnceLock<DomainRateLimiter> = OnceLock::new();
+    LIMITER
+        .get_or_init(|| Arc::new(Mutex::new(HashMap::new())))
+        .clone()
+}
+
+fn fib_backoff_secs(n: u32) -> u64 {
+    if n <= 2 {
+        return 1.min(MAX_BACKOFF_SECS);
+    }
+    let mut a = 1u64;
+    let mut b = 1u64;
+    for _ in 3..=n {
+        let next = a.saturating_add(b);
+        a = b;
+        b = next;
+        if b >= MAX_BACKOFF_SECS {
+            return MAX_BACKOFF_SECS;
+        }
+    }
+    b.min(MAX_BACKOFF_SECS)
+}
+
+/// Parse Retry-After delta-seconds. HTTP-date is not supported here.
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    let secs: u64 = value.trim().parse().ok()?;
+    Some(Duration::from_secs(secs))
+}
+
+/// Reserve the next crawl-delay slot under the lock, then sleep outside it.
+/// Fixes the stale last-access race (check→unlock→sleep→relock).
+/// Returns Err(wait) without sleeping when the domain will not open before
+/// `deadline`, so a long 429 backoff fails fast instead of burning the timeout.
+async fn acquire_domain(
+    limiter: &DomainRateLimiter,
+    domain: &str,
+    delay: Duration,
+    deadline: Instant,
+) -> Result<(), Duration> {
+    loop {
+        let sleep_for = {
+            let mut map = limiter.lock().await;
+            let now = Instant::now();
+            let state = map
+                .entry(domain.to_string())
+                .or_insert_with(|| DomainLimitState::new(now));
+            let ready_at = state.gate();
+            if now < ready_at {
+                if ready_at > deadline {
+                    return Err(ready_at.saturating_duration_since(now));
+                }
+                Some(ready_at.saturating_duration_since(now))
+            } else {
+                state.next_allowed = now + delay;
+                None
+            }
+        };
+        match sleep_for {
+            None => return Ok(()),
+            Some(d) if d.is_zero() => tokio::task::yield_now().await,
+            Some(d) => tokio::time::sleep(d).await,
+        }
+    }
+}
+
+async fn note_429(limiter: &DomainRateLimiter, domain: &str, retry_after: Option<Duration>) {
+    let mut map = limiter.lock().await;
+    let now = Instant::now();
+    let state = map
+        .entry(domain.to_string())
+        .or_insert_with(|| DomainLimitState::new(now));
+    state.consecutive_429s = state.consecutive_429s.saturating_add(1);
+    let backoff = retry_after
+        .unwrap_or_else(|| Duration::from_secs(fib_backoff_secs(state.consecutive_429s)))
+        .min(Duration::from_secs(MAX_BACKOFF_SECS));
+    let until = now + backoff;
+    state.blocked_until = Some(until);
+    if state.next_allowed < until {
+        state.next_allowed = until;
+    }
+}
+
+async fn note_success(limiter: &DomainRateLimiter, domain: &str) {
+    let mut map = limiter.lock().await;
+    if let Some(state) = map.get_mut(domain) {
+        state.blocked_until = None;
+        state.consecutive_429s = 0;
+    }
+}
 
 /// Single crawl result
 #[derive(Debug, serde::Serialize)]
@@ -740,7 +860,7 @@ async fn fetch_and_extract(
     let url_for_timeout = url.clone();
     match tokio::time::timeout(
         timeout,
-        fetch_and_extract_inner(client, url, extraction, rate_limiter, delay_ms),
+        fetch_and_extract_inner(client, url, extraction, rate_limiter, delay_ms, start + timeout),
     )
     .await
     {
@@ -767,36 +887,30 @@ async fn fetch_and_extract_inner(
     extraction: &Option<ExtractionRequest>,
     rate_limiter: &DomainRateLimiter,
     delay_ms: u64,
+    deadline: Instant,
 ) -> CrawlResult {
-    let start = std::time::Instant::now();
+    let start = Instant::now();
+    let domain = extract_domain(&url);
 
     // Apply per-domain rate limiting
-    if delay_ms > 0 {
-        let domain = extract_domain(&url);
-        let delay = Duration::from_millis(delay_ms);
-
-        let wait_time = {
-            let limiter = rate_limiter.lock().await;
-            if let Some(last_access) = limiter.get(&domain) {
-                let elapsed = last_access.elapsed();
-                if elapsed < delay {
-                    Some(delay - elapsed)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        };
-
-        if let Some(wait) = wait_time {
-            tokio::time::sleep(wait).await;
-        }
-
-        // Update last access time
+    if !domain.is_empty() {
+        if let Err(wait) =
+            acquire_domain(rate_limiter, &domain, Duration::from_millis(delay_ms), deadline).await
         {
-            let mut limiter = rate_limiter.lock().await;
-            limiter.insert(domain, std::time::Instant::now());
+            return CrawlResult {
+                final_url: url.clone(),
+                url,
+                status: 0,
+                content_type: String::new(),
+                body: String::new(),
+                error: Some(format!(
+                    "rate limited: {} backing off for {}ms more (after HTTP 429 or crawl delay)",
+                    domain,
+                    wait.as_millis()
+                )),
+                extracted: None,
+                response_time_ms: start.elapsed().as_millis() as u64,
+            };
         }
     }
 
@@ -811,8 +925,34 @@ async fn fetch_and_extract_inner(
                 .unwrap_or("")
                 .to_string();
 
+            if status == 429 {
+                let retry_after = response
+                    .headers()
+                    .get(reqwest::header::RETRY_AFTER)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(parse_retry_after);
+                if !domain.is_empty() {
+                    note_429(rate_limiter, &domain, retry_after).await;
+                }
+                let _ = response.bytes().await;
+                return CrawlResult {
+                    url,
+                    final_url,
+                    status,
+                    content_type,
+                    body: String::new(),
+                    error: Some("HTTP 429 Too Many Requests".to_string()),
+                    extracted: None,
+                    response_time_ms: start.elapsed().as_millis() as u64,
+                };
+            }
+
             match response.text().await {
                 Ok(body) => {
+                    if (200..400).contains(&status) && !domain.is_empty() {
+                        note_success(rate_limiter, &domain).await;
+                    }
+
                     let extracted = if let Some(req) = extraction {
                         let result = extract_all(&body, req);
                         // Convert HashMap to JSON Value
@@ -952,7 +1092,7 @@ fn run_batch_crawl(request: BatchCrawlRequest) -> Result<BatchCrawlResponse, Str
         let delay_ms = request.delay_ms;
         let respect_robots = request.respect_robots;
         let user_agent = request.user_agent.clone();
-        let rate_limiter: DomainRateLimiter = Arc::new(Mutex::new(HashMap::new()));
+        let rate_limiter = global_rate_limiter();
 
         // The robots.txt pre-check and the fetch share one budget: crawl() sends
         // one URL per call, and SET crawler_timeout_ms must bound the whole call.
@@ -1378,5 +1518,61 @@ mod timeout_tests {
             "errors: {:?}",
             result.errors
         );
+    }
+}
+
+#[cfg(test)]
+mod rate_limit_tests {
+    use super::*;
+
+    fn local_limiter() -> DomainRateLimiter {
+        Arc::new(Mutex::new(HashMap::new()))
+    }
+
+    #[test]
+    fn backoff_is_fibonacci_and_capped() {
+        let seq: Vec<u64> = (1..=8).map(fib_backoff_secs).collect();
+        assert_eq!(seq, vec![1, 1, 2, 3, 5, 8, 13, 21]);
+        assert_eq!(fib_backoff_secs(50), MAX_BACKOFF_SECS);
+    }
+
+    #[test]
+    fn retry_after_accepts_delta_seconds_only() {
+        assert_eq!(parse_retry_after(" 120 "), Some(Duration::from_secs(120)));
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT"), None);
+    }
+
+    #[test]
+    fn crawl_delay_is_reserved_per_domain() {
+        let limiter = local_limiter();
+        let delay = Duration::from_millis(200);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let start = Instant::now();
+        tokio_runtime().block_on(async {
+            let (a, b) = futures::join!(
+                acquire_domain(&limiter, "example.com", delay, deadline),
+                acquire_domain(&limiter, "example.com", delay, deadline)
+            );
+            assert!(a.is_ok() && b.is_ok());
+        });
+        // Two concurrent requests to one domain: the second waits one delay.
+        assert!(start.elapsed() >= delay, "elapsed {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn backoff_past_deadline_fails_fast() {
+        let limiter = local_limiter();
+        tokio_runtime().block_on(async {
+            note_429(&limiter, "example.com", Some(Duration::from_secs(60))).await;
+            let start = Instant::now();
+            let deadline = start + Duration::from_secs(1);
+            let err = acquire_domain(&limiter, "example.com", Duration::ZERO, deadline).await;
+            assert!(err.is_err(), "blocked domain must not wait past the deadline");
+            assert!(start.elapsed() < Duration::from_millis(500));
+            // Other domains are unaffected.
+            assert!(acquire_domain(&limiter, "other.example", Duration::ZERO, deadline)
+                .await
+                .is_ok());
+        });
     }
 }
