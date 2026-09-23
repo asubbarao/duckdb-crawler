@@ -8,7 +8,9 @@
 #include "yyjson.hpp"
 #include "duckdb.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/common/string_util.hpp"
 #include <set>
+#include <unordered_set>
 
 namespace duckdb {
 
@@ -40,6 +42,35 @@ struct ReadHtmlBindData : public TableFunctionData {
     idx_t num_rows = 0;
     string error;
 };
+
+// Sanitize a header for use as a SQL column name.
+static string SanitizeHeaderName(const string &header, idx_t fallback_idx) {
+    string col_name = header;
+    StringUtil::Trim(col_name);
+    if (col_name.empty()) {
+        col_name = "column" + std::to_string(fallback_idx);
+    }
+    for (auto &c : col_name) {
+        if (c == ' ' || c == '-' || c == '/' || c == '\\' || c == '(' || c == ')' || c == ',') {
+            c = '_';
+        }
+    }
+    return col_name;
+}
+
+// DuckDB column names are case-insensitive, so compare lowercased. The first
+// occurrence keeps its name; later collisions become base_1, base_2, ...
+static string MakeUniqueColumnName(const string &base, unordered_set<string> &used) {
+    if (used.insert(StringUtil::Lower(base)).second) {
+        return base;
+    }
+    for (idx_t i = 1;; i++) {
+        string candidate = base + "_" + std::to_string(i);
+        if (used.insert(StringUtil::Lower(candidate)).second) {
+            return candidate;
+        }
+    }
+}
 
 //===--------------------------------------------------------------------===//
 // Global State
@@ -525,19 +556,12 @@ static unique_ptr<FunctionData> ReadHtmlBind(ClientContext &context,
     // Infer column types based on data
     InferColumnTypes(*bind_data);
 
-    // Define columns based on extracted headers and inferred types
+    // Define columns based on extracted headers and inferred types.
+    // Deduplicate after sanitization so the binder never sees duplicate names (issue #3).
+    unordered_set<string> used_names;
     for (idx_t i = 0; i < bind_data->headers.size(); i++) {
-        // Sanitize header name for SQL compatibility
-        string col_name = bind_data->headers[i];
-        if (col_name.empty()) {
-            col_name = "column" + std::to_string(names.size() + 1);
-        }
-        // Replace spaces and special chars with underscores
-        for (auto &c : col_name) {
-            if (c == ' ' || c == '-' || c == '/' || c == '\\' || c == '(' || c == ')' || c == ',') {
-                c = '_';
-            }
-        }
+        string col_name = SanitizeHeaderName(bind_data->headers[i], names.size() + 1);
+        col_name = MakeUniqueColumnName(col_name, used_names);
         names.emplace_back(col_name);
 
         // Use inferred type
